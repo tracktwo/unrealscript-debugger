@@ -1,10 +1,10 @@
-// Module for the Unrealscript debugger interface.
-// See https://docs.unrealengine.com/udk/Three/DebuggerInterface.html
-
+/// Module for the Unrealscript debugger interface.
+/// See https://docs.unrealengine.com/udk/Three/DebuggerInterface.html
 pub mod debugger;
 
-use std::{sync::Mutex, ffi::{c_char, c_int}};
 use debugger::{Debugger, WatchKind};
+use log::trace;
+use std::{ffi::c_char, sync::Mutex};
 
 /// The debugger state. Calls from Unreal are dispatched into this instance.
 static DEBUGGER: Mutex<Option<Debugger>> = Mutex::new(None);
@@ -14,10 +14,9 @@ static DEBUGGER: Mutex<Option<Debugger>> = Mutex::new(None);
 /// for convenience since it is primarily passed strings.
 type UnrealCallback = extern "C" fn(*const u8) -> ();
 
-/// SetCallback: Called once from Unreal when the debugger interface is
-/// initialized, passing the callback function to use. This is the primary
-/// entry point into the debugger interface and we use this to launch the
-/// effective 'main'.
+/// Called once from Unreal when the debugger interface is initialized, passing the callback
+/// function to use. This is the primary entry point into the debugger interface and we use this to
+/// launch the effective 'main'.
 #[no_mangle]
 pub extern "C" fn SetCallback(callback: Option<UnrealCallback>) {
     let cb = callback.expect("Unreal should never give us a null callback.");
@@ -25,48 +24,72 @@ pub extern "C" fn SetCallback(callback: Option<UnrealCallback>) {
     debugger::initialize(cb);
 }
 
+/// Called each time the debugger breaks, as well as just after SetCallback when the debugger is
+/// first initialized. Since this implementation doesn't have a UI in-process this does nothing.
 #[no_mangle]
 pub extern "C" fn ShowDllForm() {
+    trace!("ShowDllForm");
 }
 
+/// Add the given class to the class hierarchy. Tells the debugger the names of all currently
+/// loaded classes.
 #[no_mangle]
 pub extern "C" fn AddClassToHierarchy(class_name: *const c_char) -> () {
-    if let Ok(mut dbg) = DEBUGGER.lock() {
-        if let Some(dbg) = dbg.as_mut() {
-            dbg.add_class_to_hierarchy(class_name);
-        }
-    }
+    trace!("AddClassToHierarchy");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.add_class_to_hierarchy(class_name);
 }
 
+/// Clear the class hierarchy in the debugger state.
 #[no_mangle]
 pub extern "C" fn ClearClassHierarchy() -> () {
-    if let Ok(mut dbg) = DEBUGGER.lock() {
-        if let Some(dbg) = dbg.as_mut() {
-            dbg.clear_class_hierarchy();
-        }
-    }
+    trace!("ClearClassHierarchy");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.clear_class_hierarchy();
 }
 
+/// ???
 #[no_mangle]
 pub extern "C" fn BuildClassHierarchy() -> () {
+    trace!("BuildClassHierarchy");
 }
 
+/// Legacy version of ClearAWatch.
 #[no_mangle]
 pub extern "C" fn ClearWatch(kind: i32) -> () {
-    if let Ok(mut dbg) = DEBUGGER.lock() {
-        if let Some(dbg) = dbg.as_mut() {
-            dbg.clear_watch(WatchKind::from_int(kind)
-                .expect("Unreal should never give us a bad watch kind."));
-        }
-    }
+    trace!("ClearWatch");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.clear_watch(
+        WatchKind::from_int(kind).expect("Unreal should never give us a bad watch kind."),
+    );
 }
 
+/// Removes all watches of the given kind. Used when rebuilding the watch list.
+/// This occurs each time the debugger breaks to refresh watches.
 #[no_mangle]
 pub extern "C" fn ClearAWatch(kind: i32) -> () {
-    if let Ok(mut dbg) = DEBUGGER.lock() {
-        if let Some(dbg) = dbg.as_mut() {
-            dbg.clear_watch(WatchKind::from_int(kind)
-                .expect("Unreal should never give us a bad watch kind."));
-        }
-    }
+    trace!("ClearAWatch");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.clear_watch(
+        WatchKind::from_int(kind).expect("Unreal should never give us a bad watch kind."),
+    );
+}
+
+/// Adds a watch to the watch list for the given kind. This is the only Unreal
+/// debugger API that returns a value.
+#[no_mangle]
+pub extern "C" fn AddAWatch(kind: i32, parent: i32, name: *const c_char, value: *const c_char) -> i32 {
+    trace!("AddAWatch");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.add_watch(
+        WatchKind::from_int(kind).expect("Unreal should never give us a bad watch kind."),
+        parent,
+        name,
+        value
+    )
 }

@@ -1,10 +1,10 @@
+use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
+use serde::{Deserialize, Serialize};
 use std::ffi::{c_char, CStr};
 use std::net::{TcpListener, TcpStream};
 use std::{fmt, io, ptr};
 use std::{sync::Mutex, thread};
-use flexi_logger::{Logger, FileSpec, LoggerHandle, FlexiLoggerError};
 use tcp_channel::{ChannelRecv, ChannelSend, ReceiverBuilder, SenderBuilder};
-use serde::{Serialize, Deserialize};
 
 use super::UnrealCallback;
 use super::DEBUGGER;
@@ -16,12 +16,21 @@ static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 /// A struct representing the debugger state.
 pub struct Debugger {
     class_hierarchy: Vec<Box<CStr>>,
+    local_watches: Vec<Watch>,
+    global_watches: Vec<Watch>,
+    user_watches: Vec<Watch>,
+}
+
+struct Watch {
+    parent: i32,
+    name: Box<CStr>,
+    value: Box<CStr>,
 }
 
 pub enum WatchKind {
     Local,
     Global,
-    User
+    User,
 }
 
 impl WatchKind {
@@ -37,7 +46,12 @@ impl WatchKind {
 
 impl Debugger {
     fn new() -> Debugger {
-        Debugger { class_hierarchy: Vec::new() }
+        Debugger {
+            class_hierarchy: Vec::new(),
+            local_watches: Vec::new(),
+            global_watches: Vec::new(),
+            user_watches: Vec::new(),
+        }
     }
 
     /// Add a class to the debugger's class hierarchy.
@@ -52,6 +66,39 @@ impl Debugger {
     }
 
     pub fn clear_watch(&mut self, kind: WatchKind) -> () {
+        match kind {
+            WatchKind::Local => self.local_watches.clear(),
+            WatchKind::Global => self.global_watches.clear(),
+            WatchKind::User => self.user_watches.clear(),
+        }
+    }
+
+    pub fn add_watch(
+        &mut self,
+        kind: WatchKind,
+        parent: i32,
+        name: *const c_char,
+        value: *const c_char,
+    ) -> i32 {
+        let watch = Watch {
+            parent,
+            name: make_cstr(name),
+            value: make_cstr(value),
+        };
+        let vec:&mut Vec<Watch> = match kind {
+            WatchKind::Local => self.local_watches.as_mut(),
+            WatchKind::Global => self.global_watches.as_mut(),
+            WatchKind::User => self.user_watches.as_mut(),
+        };
+
+        // The given parent must be a member of our vector already. Note that
+        // Unreal indicates root variables with parent -1.
+        assert!(parent < vec.len().try_into().unwrap());
+
+        // Add the new entry to the vector and return an identifier for it:
+        // the index of this entry in the vector.
+        vec.push(watch);
+        vec.len() as i32 - 1
     }
 }
 
@@ -80,14 +127,13 @@ pub fn init_logger() -> Result<(), FlexiLoggerError> {
     let mut logger = LOGGER.lock().unwrap();
     assert!(logger.is_none(), "Already have a logger. Multiple inits?");
     let new_logger = Logger::try_with_env_or_str("info")?
-            .log_to_file(FileSpec::default())
-            .start()?;
+        .log_to_file(FileSpec::default())
+        .start()?;
     logger.replace(new_logger);
     Ok(())
 }
 
 fn main_loop(cb: UnrealCallback) -> () {
-
     // Start listening on a socket for connections from the adapter.
     let mut server = TcpListener::bind(format!("127.0.0.1:{PORT}")).expect("Failed to bind port");
     loop {
@@ -108,10 +154,13 @@ enum InterfaceMessage {
 fn handle_connection(server: &mut TcpListener) -> Result<(), io::Error> {
     loop {
         let (stream, addr) = server.accept()?;
-        let mut rx = ReceiverBuilder::realtime().with_type::<InterfaceMessage>().build(stream.try_clone()?);
-        let mut tx = SenderBuilder::realtime().with_type::<InterfaceMessage>().build(stream);
-        while let msg  = rx.recv() {
-        }
+        let mut rx = ReceiverBuilder::realtime()
+            .with_type::<InterfaceMessage>()
+            .build(stream.try_clone()?);
+        let mut tx = SenderBuilder::realtime()
+            .with_type::<InterfaceMessage>()
+            .build(stream);
+        while let msg = rx.recv() {}
     }
 }
 
@@ -128,7 +177,7 @@ fn make_cstr(raw: *const c_char) -> Box<CStr> {
             return CStr::from_ptr(raw).to_owned().into();
         }
     }
-    
+
     CStr::from_bytes_with_nul(b"\0").unwrap().to_owned().into()
 }
 
@@ -152,7 +201,10 @@ mod tests {
         let cls = "Package.Class".as_ptr() as *const i8;
         let mut dbg = Debugger::new();
         dbg.add_class_to_hierarchy(cls);
-        assert_eq!(dbg.class_hierarchy[0].as_ref().to_str().unwrap(), "Package.Class");
+        assert_eq!(
+            dbg.class_hierarchy[0].as_ref().to_str().unwrap(),
+            "Package.Class"
+        );
     }
 
     #[test]
@@ -164,4 +216,47 @@ mod tests {
         dbg.clear_class_hierarchy();
         assert!(dbg.class_hierarchy.is_empty());
     }
+
+    #[test]
+    fn add_watches_are_independent() {
+        let name = "SomeVar".as_ptr() as *const i8;
+        let val = "10".as_ptr() as *const i8;
+        let mut dbg = Debugger::new();
+        assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 0);
+        assert_eq!(dbg.local_watches.len(), 1);
+        assert_eq!(dbg.global_watches.len(), 0);
+        assert_eq!(dbg.user_watches.len(), 0);
+        assert_eq!(dbg.add_watch(WatchKind::Global, -1, name, val), 0);
+        assert_eq!(dbg.local_watches.len(), 1);
+        assert_eq!(dbg.global_watches.len(), 1);
+        assert_eq!(dbg.user_watches.len(), 0);
+        assert_eq!(dbg.add_watch(WatchKind::User, -1, name, val), 0);
+        assert_eq!(dbg.local_watches.len(), 1);
+        assert_eq!(dbg.global_watches.len(), 1);
+        assert_eq!(dbg.user_watches.len(), 1);
+    }
+
+    #[test]
+    fn clear_watches_are_independent() {
+        let name = "SomeVar".as_ptr() as *const i8;
+        let val = "10".as_ptr() as *const i8;
+        let mut dbg = Debugger::new();
+        dbg.add_watch(WatchKind::Local, -1, name, val);
+        dbg.add_watch(WatchKind::Global, -1, name, val);
+        dbg.add_watch(WatchKind::User, -1, name, val);
+        dbg.clear_watch(WatchKind::Local);
+        assert_eq!(dbg.local_watches.len(), 0);
+        assert_eq!(dbg.global_watches.len(), 1);
+        assert_eq!(dbg.user_watches.len(), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn add_watch_invalid_parent() {
+        let name = "SomeVar".as_ptr() as *const i8;
+        let val = "10".as_ptr() as *const i8;
+        let mut dbg = Debugger::new();
+        dbg.add_watch(WatchKind::Local, 0, name, val);
+    }
+
 }
