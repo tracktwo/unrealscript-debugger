@@ -192,7 +192,7 @@ pub fn init_logger() -> Result<(), FlexiLoggerError> {
     let mut logger = LOGGER.lock().unwrap();
     assert!(logger.is_none(), "Already have a logger. Multiple inits?");
     let new_logger = Logger::try_with_env_or_str("trace")?
-        .log_to_file(FileSpec::default().directory("C:\\Users\\jonat\\Documents"))
+        .log_to_file(FileSpec::default().directory("DebuggerLogs"))
         .start()?;
     logger.replace(new_logger);
     Ok(())
