@@ -1,6 +1,6 @@
 use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
 use serde::{Deserialize, Serialize};
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, CString};
 use std::net::{TcpListener, TcpStream};
 use std::{fmt, io, ptr};
 use std::{sync::Mutex, thread};
@@ -15,16 +15,23 @@ static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 
 /// A struct representing the debugger state.
 pub struct Debugger {
-    class_hierarchy: Vec<Box<CStr>>,
+    class_hierarchy: Vec<Box<CString>>,
     local_watches: Vec<Watch>,
     global_watches: Vec<Watch>,
     user_watches: Vec<Watch>,
+    watches_locked: bool,
+    breakpoints: Vec<Breakpoint>,
 }
 
 struct Watch {
     parent: i32,
-    name: Box<CStr>,
-    value: Box<CStr>,
+    name: Box<CString>,
+    value: Box<CString>,
+}
+
+struct Breakpoint {
+    class_name: Box<CString>,
+    line: i32
 }
 
 pub enum WatchKind {
@@ -51,12 +58,14 @@ impl Debugger {
             local_watches: Vec::new(),
             global_watches: Vec::new(),
             user_watches: Vec::new(),
+            watches_locked: false,
+            breakpoints: Vec::new(),
         }
     }
 
     /// Add a class to the debugger's class hierarchy.
     pub fn add_class_to_hierarchy(&mut self, arg: *const c_char) -> () {
-        let str = make_cstr(arg);
+        let str = make_cstring(arg);
         self.class_hierarchy.push(str);
     }
 
@@ -82,8 +91,8 @@ impl Debugger {
     ) -> i32 {
         let watch = Watch {
             parent,
-            name: make_cstr(name),
-            value: make_cstr(value),
+            name: make_cstring(name),
+            value: make_cstring(value),
         };
         let vec:&mut Vec<Watch> = match kind {
             WatchKind::Local => self.local_watches.as_mut(),
@@ -99,6 +108,33 @@ impl Debugger {
         // the index of this entry in the vector.
         vec.push(watch);
         vec.len() as i32 - 1
+    }
+
+    pub fn lock_watchlist(&mut self) -> () {
+        assert!(!self.watches_locked);
+        self.watches_locked = true;
+    }
+
+    pub fn unlock_watchlist(&mut self) -> () {
+        assert!(self.watches_locked);
+        self.watches_locked = false;
+    }
+
+    pub fn add_breakpoint(&mut self, class_name: *const c_char, line: i32) -> () {
+        let bp = Breakpoint { 
+            class_name: make_cstring(class_name),
+            line
+        };
+        self.breakpoints.push(bp);
+    }
+
+    pub fn remove_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
+        let str = make_cstr(name);
+        if let Some(idx) = self.breakpoints.iter().position(|val| val.class_name.as_c_str() == str && val.line == line) {
+            self.breakpoints.swap_remove(idx);
+        } else {
+            log::error!("Could not find breakpoint {:#?}:{line}", str.to_string_lossy());
+        }
     }
 }
 
@@ -171,15 +207,26 @@ fn handle_connection(server: &mut TcpListener) -> Result<(), io::Error> {
 /// in the debugger adapter, not in this interface.
 ///
 /// TODO: What about non-western game locales? What format text do we get?
-fn make_cstr(raw: *const c_char) -> Box<CStr> {
+fn make_cstring(raw: *const c_char) -> Box<CString> {
     if raw != ptr::null() {
         unsafe {
-            return CStr::from_ptr(raw).to_owned().into();
+            return Box::new(CStr::from_ptr(raw).clone().to_owned())
         }
     }
 
-    CStr::from_bytes_with_nul(b"\0").unwrap().to_owned().into()
+    Box::new(CString::new("").unwrap())
 }
+
+fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
+    if raw != ptr::null() {
+        unsafe {
+            return CStr::from_ptr(raw)
+        }
+    }
+
+    CStr::from_bytes_with_nul(b"\0").unwrap()
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -187,13 +234,22 @@ mod tests {
 
     #[test]
     fn cstr_from_null() {
-        assert_eq!(make_cstr(ptr::null()).as_ref().to_str().unwrap(), "");
+        assert_eq!(make_cstring(ptr::null()).to_str().unwrap(), "");
     }
 
     #[test]
     fn cstr_from_text() {
         let p = "hello world".as_ptr() as *const i8;
-        assert_eq!(make_cstr(p).as_ref().to_str().unwrap(), "hello world");
+        assert_eq!(make_cstring(p).to_str().unwrap(), "hello world");
+    }
+
+    #[test]
+    fn string_ownership() {
+        let mut str = "I'M A STRING".clone().to_owned();
+        let ptr = str.as_mut_ptr() as *mut i8;
+        let copy = make_cstring(ptr);
+        str.make_ascii_lowercase();
+        assert_eq!(copy.to_str().unwrap(), "I'M A STRING");
     }
 
     #[test]
@@ -259,4 +315,32 @@ mod tests {
         dbg.add_watch(WatchKind::Local, 0, name, val);
     }
 
+    #[test]
+    fn adds_breakpoint() {
+        let class_name = "SomeClass".as_ptr() as *const i8;
+        let mut dbg = Debugger::new();
+        dbg.add_breakpoint(class_name, 10);
+        assert_eq!(dbg.breakpoints.len(), 1);
+    }
+
+    #[test]
+    fn can_find_breakpoint() {
+        let class_name = "SomeClass".as_ptr() as *const i8;
+        let mut dbg = Debugger::new();
+        dbg.add_breakpoint(class_name, 10);
+        dbg.remove_breakpoint(class_name, 10);
+        assert_eq!(dbg.breakpoints.len(), 0);
+    }
+
+    #[test]
+    fn remove_unknown_breakpoint() {
+        let class_name = "SomeClass".as_ptr() as *const i8;
+        let another_name = "AnotherClass".as_ptr() as *const i8;
+        let mut dbg = Debugger::new();
+        dbg.add_breakpoint(class_name, 10);
+        dbg.remove_breakpoint(another_name, 20);
+        assert_eq!(dbg.breakpoints.len(), 1);
+        dbg.remove_breakpoint(class_name, 11);
+        assert_eq!(dbg.breakpoints.len(), 1);
+    }
 }

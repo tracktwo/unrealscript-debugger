@@ -1,7 +1,3 @@
-/// Module for the Unrealscript debugger interface.
-/// See https://docs.unrealengine.com/udk/Three/DebuggerInterface.html
-pub mod debugger;
-
 use debugger::{Debugger, WatchKind};
 use log::trace;
 use std::{ffi::c_char, sync::Mutex};
@@ -15,7 +11,9 @@ static DEBUGGER: Mutex<Option<Debugger>> = Mutex::new(None);
 type UnrealCallback = extern "C" fn(*const u8) -> ();
 
 /// Called once from Unreal when the debugger interface is initialized, passing the callback
-/// function to use. This is the primary entry point into the debugger interface and we use this to
+/// function to use.
+///
+/// This is the primary entry point into the debugger interface and we use this to
 /// launch the effective 'main'.
 #[no_mangle]
 pub extern "C" fn SetCallback(callback: Option<UnrealCallback>) {
@@ -25,14 +23,17 @@ pub extern "C" fn SetCallback(callback: Option<UnrealCallback>) {
 }
 
 /// Called each time the debugger breaks, as well as just after SetCallback when the debugger is
-/// first initialized. Since this implementation doesn't have a UI in-process this does nothing.
+/// first initialized.
+///
+/// Since this implementation doesn't have a UI in-process this does nothing.
 #[no_mangle]
 pub extern "C" fn ShowDllForm() {
     trace!("ShowDllForm");
 }
 
-/// Add the given class to the class hierarchy. Tells the debugger the names of all currently
-/// loaded classes.
+/// Add the given class to the class hierarchy.
+///
+/// Tells the debugger the names of all currently loaded classes.
 #[no_mangle]
 pub extern "C" fn AddClassToHierarchy(class_name: *const c_char) -> () {
     trace!("AddClassToHierarchy");
@@ -59,7 +60,7 @@ pub extern "C" fn BuildClassHierarchy() -> () {
 /// Legacy version of ClearAWatch.
 #[no_mangle]
 pub extern "C" fn ClearWatch(kind: i32) -> () {
-    trace!("ClearWatch");
+    trace!("ClearWatch {kind}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.clear_watch(
@@ -67,11 +68,13 @@ pub extern "C" fn ClearWatch(kind: i32) -> () {
     );
 }
 
-/// Removes all watches of the given kind. Used when rebuilding the watch list.
+/// Removes all watches of the given kind.
+///
+/// Used when rebuilding the watch list.
 /// This occurs each time the debugger breaks to refresh watches.
 #[no_mangle]
 pub extern "C" fn ClearAWatch(kind: i32) -> () {
-    trace!("ClearAWatch");
+    trace!("ClearAWatch {kind}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.clear_watch(
@@ -79,11 +82,13 @@ pub extern "C" fn ClearAWatch(kind: i32) -> () {
     );
 }
 
-/// Adds a watch to the watch list for the given kind. This is the only Unreal
+/// Adds a watch to the watch list for the given kind.
+///
+/// This is the only Unreal
 /// debugger API that returns a value.
 #[no_mangle]
 pub extern "C" fn AddAWatch(kind: i32, parent: i32, name: *const c_char, value: *const c_char) -> i32 {
-    trace!("AddAWatch");
+    trace!("AddAWatch {kind} {parent}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.add_watch(
@@ -93,3 +98,52 @@ pub extern "C" fn AddAWatch(kind: i32, parent: i32, name: *const c_char, value: 
         value
     )
 }
+
+/// Locks the given watch list.
+///
+/// Called before Unreal updates the watchlist of the given kind. This will be
+/// followed by some number of 'AddAWatch' calls, followed by 'UnlockList'.
+#[no_mangle]
+pub extern "C" fn LockList(_kind: i32) -> () {
+    trace!("LockList {_kind}");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.lock_watchlist()
+}
+
+/// Unlocks the given watch list.
+///
+/// Called after Unreal has finished updating the watchlist of the given kind.
+#[no_mangle]
+pub extern "C" fn UnlockList(_kind: i32) -> () {
+    trace!("UnlockList {_kind}");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.unlock_watchlist()
+}
+
+#[no_mangle]
+pub extern "C" fn AddBreakpoint(class_name: *const c_char, line: i32) -> () {
+
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.add_breakpoint(class_name, line);
+}
+
+#[no_mangle]
+pub extern "C" fn RemoveBreakpoint(class_name: *const c_char, line: i32) -> () {
+
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.remove_breakpoint(class_name, line);
+}
+
+/// Module that manages the internal debugger state within the interface DLL.
+///
+/// As Unreal invokes the API entry points of this interface the debugger state
+/// is updated. Since the interface module is only a very thin wrapper the
+/// functions for handling calls from the DLL are very low-level and deal with
+/// C types. These are converted internally to a slightly higher level for
+/// convenience, but with only minimal processing.
+pub mod debugger;
+
