@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clib = "0.2"
 flexi_logger = "0.24"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 tcp-channel = "0.3"
+
+[lib]
+crate-type = ["cdylib"]

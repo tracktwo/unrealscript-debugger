@@ -21,19 +21,30 @@ pub struct Debugger {
     user_watches: Vec<Watch>,
     watches_locked: bool,
     breakpoints: Vec<Breakpoint>,
+    callstack: Vec<Frame>,
+    current_object_name: Option<Box<CString>>,
 }
 
+/// A variable watch.
 struct Watch {
     parent: i32,
     name: Box<CString>,
     value: Box<CString>,
 }
 
+/// A breakpoint, verified by Unreal.
 struct Breakpoint {
     class_name: Box<CString>,
-    line: i32
+    line: i32,
 }
 
+/// A callstack frame.
+struct Frame {
+    class_name: Box<CString>,
+    line: i32,
+}
+
+// The kind of watch, e.g. scope or user-defined watches.
 pub enum WatchKind {
     Local,
     Global,
@@ -60,6 +71,8 @@ impl Debugger {
             user_watches: Vec::new(),
             watches_locked: false,
             breakpoints: Vec::new(),
+            callstack: Vec::new(),
+            current_object_name: None,
         }
     }
 
@@ -136,6 +149,22 @@ impl Debugger {
             log::error!("Could not find breakpoint {:#?}:{line}", str.to_string_lossy());
         }
     }
+
+    pub fn clear_callstack(&mut self) -> () {
+        self.callstack.clear();
+    }
+
+    pub fn add_frame(&mut self, class_name: *const c_char, line: i32) -> () {
+        let frame = Frame { 
+            class_name: make_cstring(class_name),
+            line
+        };
+        self.callstack.push(frame);
+    }
+
+    pub fn current_object_name(&mut self, obj_name: *const c_char) -> () {
+        self.current_object_name.replace(make_cstring(obj_name));
+    }
 }
 
 /// Initialize the debugger instance. This should be called exactly once when
@@ -162,8 +191,8 @@ pub fn initialize(cb: UnrealCallback) -> () {
 pub fn init_logger() -> Result<(), FlexiLoggerError> {
     let mut logger = LOGGER.lock().unwrap();
     assert!(logger.is_none(), "Already have a logger. Multiple inits?");
-    let new_logger = Logger::try_with_env_or_str("info")?
-        .log_to_file(FileSpec::default())
+    let new_logger = Logger::try_with_env_or_str("trace")?
+        .log_to_file(FileSpec::default().directory("C:\\Users\\jonat\\Documents"))
         .start()?;
     logger.replace(new_logger);
     Ok(())

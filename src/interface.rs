@@ -124,7 +124,7 @@ pub extern "C" fn UnlockList(_kind: i32) -> () {
 
 #[no_mangle]
 pub extern "C" fn AddBreakpoint(class_name: *const c_char, line: i32) -> () {
-
+    trace!("AddBreakpoint");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.add_breakpoint(class_name, line);
@@ -132,10 +132,57 @@ pub extern "C" fn AddBreakpoint(class_name: *const c_char, line: i32) -> () {
 
 #[no_mangle]
 pub extern "C" fn RemoveBreakpoint(class_name: *const c_char, line: i32) -> () {
-
+    trace!("RemoveBreakpoint");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.remove_breakpoint(class_name, line);
+}
+
+#[no_mangle]
+pub extern "C" fn EditorLoadClass(class_name: *const c_char) -> () {
+    trace!("EditorLoadClass");
+    // TODO Implement
+}
+
+#[no_mangle]
+pub extern "C" fn EditorGotoLine(line: i32, highlight: i32) -> () {
+    trace!("EditorLoadClass");
+    // TODO Implement
+}
+
+#[no_mangle]
+pub extern "C" fn AddLineToLog(text: *const c_char) -> () {
+    trace!("AddLineToLog");
+    // TODO Implement
+}
+
+#[no_mangle]
+pub extern "C" fn CallStackClear() -> () {
+    trace!("CallStackClear");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.clear_callstack();
+}
+
+#[no_mangle]
+pub extern "C" fn CallStackAdd(class_name: *const c_char) -> () {
+    trace!("CallStackClear");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.add_frame(class_name, 0);
+}
+
+#[no_mangle]
+pub extern "C" fn SetCurrentObjectName(obj_name: *const c_char) -> () {
+    trace!("SetCurrentObjectName");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.current_object_name(obj_name);
+}
+
+#[no_mangle]
+pub extern "C" fn DebugWindowState(code: i32) -> () {
+    trace!("DebugWindowState {code}");
 }
 
 /// Module that manages the internal debugger state within the interface DLL.
