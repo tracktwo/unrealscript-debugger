@@ -166,7 +166,7 @@ pub extern "C" fn CallStackClear() -> () {
 
 #[no_mangle]
 pub extern "C" fn CallStackAdd(class_name: *const c_char) -> () {
-    trace!("CallStackClear");
+    trace!("CallStackAdd");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.add_frame(class_name, 0);

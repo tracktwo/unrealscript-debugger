@@ -1,10 +1,10 @@
 use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
 use serde::{Deserialize, Serialize};
+use core::time;
 use std::ffi::{c_char, CStr, CString};
-use std::net::{TcpListener, TcpStream};
-use std::{fmt, io, ptr};
+use std::net::TcpListener;
+use std::{io, ptr};
 use std::{sync::Mutex, thread};
-use tcp_channel::{ChannelRecv, ChannelSend, ReceiverBuilder, SenderBuilder};
 
 use super::UnrealCallback;
 use super::DEBUGGER;
@@ -19,7 +19,6 @@ pub struct Debugger {
     local_watches: Vec<Watch>,
     global_watches: Vec<Watch>,
     user_watches: Vec<Watch>,
-    watches_locked: bool,
     breakpoints: Vec<Breakpoint>,
     callstack: Vec<Frame>,
     current_object_name: Option<Box<CString>>,
@@ -69,7 +68,6 @@ impl Debugger {
             local_watches: Vec::new(),
             global_watches: Vec::new(),
             user_watches: Vec::new(),
-            watches_locked: false,
             breakpoints: Vec::new(),
             callstack: Vec::new(),
             current_object_name: None,
@@ -124,13 +122,9 @@ impl Debugger {
     }
 
     pub fn lock_watchlist(&mut self) -> () {
-        assert!(!self.watches_locked);
-        self.watches_locked = true;
     }
 
     pub fn unlock_watchlist(&mut self) -> () {
-        assert!(self.watches_locked);
-        self.watches_locked = false;
     }
 
     pub fn add_breakpoint(&mut self, class_name: *const c_char, line: i32) -> () {
@@ -201,6 +195,12 @@ pub fn init_logger() -> Result<(), FlexiLoggerError> {
 fn main_loop(cb: UnrealCallback) -> () {
     // Start listening on a socket for connections from the adapter.
     let mut server = TcpListener::bind(format!("127.0.0.1:{PORT}")).expect("Failed to bind port");
+
+    // Sleep for 5 seconds
+    std::thread::sleep(time::Duration::from_secs(5));
+
+    // Set a breakpoint
+    cb(b"addbreakpoint EvacAll_WotC.X2Ability_EvacAll 100\0".as_ptr());
     loop {
         match handle_connection(&mut server) {
             // TODO Logging
@@ -219,13 +219,6 @@ enum InterfaceMessage {
 fn handle_connection(server: &mut TcpListener) -> Result<(), io::Error> {
     loop {
         let (stream, addr) = server.accept()?;
-        let mut rx = ReceiverBuilder::realtime()
-            .with_type::<InterfaceMessage>()
-            .build(stream.try_clone()?);
-        let mut tx = SenderBuilder::realtime()
-            .with_type::<InterfaceMessage>()
-            .build(stream);
-        while let msg = rx.recv() {}
     }
 }
 
