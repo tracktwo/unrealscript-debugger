@@ -28,8 +28,8 @@ fn main() {
     // Spawn a new thread for the server to process messages in. This will loop
     // until the debugger quits.
     let server_thread = std::thread::spawn(move || {
-        let mut reader = BufReader::new(std::io::stdin());
-        server.run(&mut reader)
+        let reader = BufReader::new(std::io::stdin());
+        server.run(reader)
     });
 
     // Wait for the server to finish processing. We may not necessarily get back here at
