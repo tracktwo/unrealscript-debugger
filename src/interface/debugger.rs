@@ -216,10 +216,11 @@ enum InterfaceMessage {
     Continue,
 }
 
-fn handle_connection(server: &mut TcpListener) -> Result<(), io::Error> {
-    loop {
-        let (stream, addr) = server.accept()?;
-    }
+fn handle_connection(_server: &mut TcpListener) -> Result<(), io::Error> {
+    // loop {
+    //     let (stream, addr) = server.accept()?;
+    // }
+    Ok(())
 }
 
 /// Given a pointer to a string from Unreal, return a boxed CStr with the

@@ -1,4 +1,4 @@
-use std::io::{BufReader, BufRead, Read};
+use std::io::BufReader;
 
 use adapter::UnrealscriptAdapter;
 use dap::prelude::*;

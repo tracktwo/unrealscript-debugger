@@ -139,19 +139,19 @@ pub extern "C" fn RemoveBreakpoint(class_name: *const c_char, line: i32) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn EditorLoadClass(class_name: *const c_char) -> () {
+pub extern "C" fn EditorLoadClass(_class_name: *const c_char) -> () {
     trace!("EditorLoadClass");
     // TODO Implement
 }
 
 #[no_mangle]
-pub extern "C" fn EditorGotoLine(line: i32, highlight: i32) -> () {
+pub extern "C" fn EditorGotoLine(_line: i32, _highlight: i32) -> () {
     trace!("EditorLoadClass");
     // TODO Implement
 }
 
 #[no_mangle]
-pub extern "C" fn AddLineToLog(text: *const c_char) -> () {
+pub extern "C" fn AddLineToLog(_text: *const c_char) -> () {
     trace!("AddLineToLog");
     // TODO Implement
 }
@@ -164,6 +164,7 @@ pub extern "C" fn CallStackClear() -> () {
     dbg.clear_callstack();
 }
 
+/// Add the given class name to the call stack. Call stacks are built bottom-up.
 #[no_mangle]
 pub extern "C" fn CallStackAdd(class_name: *const c_char) -> () {
     trace!("CallStackAdd");
