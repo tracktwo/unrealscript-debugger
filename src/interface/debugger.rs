@@ -236,11 +236,18 @@ fn handle_connection(_server: &mut TcpListener) -> Result<(), io::Error> {
 ///
 /// TODO: What about non-western game locales? What format text do we get?
 fn make_cstring(raw: *const c_char) -> Box<CString> {
+    // The byte vector to use if we have a null pointer: return as an empty string.
+    let mut bytes: Vec<u8> = Vec::new();
     if raw != ptr::null() {
-        unsafe { return Box::new(CStr::from_ptr(raw).clone().to_owned()) }
+        unsafe {
+            let cstr = CStr::from_ptr(raw);
+            // Get a copy of the raw bytes from the given pointer.
+            bytes = cstr.to_bytes().to_owned();
+        }
     }
-
-    Box::new(CString::new("").unwrap())
+    // Create a new CString with our bytes. These bytes should never contain
+    // interior nulls.
+    return Box::new(CString::new(bytes).unwrap());
 }
 
 fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
@@ -262,22 +269,23 @@ mod tests {
 
     #[test]
     fn cstr_from_text() {
-        let p = "hello world".as_ptr() as *const i8;
+        let p = "hello world\0".as_ptr() as *const i8;
         assert_eq!(make_cstring(p).to_str().unwrap(), "hello world");
     }
 
     #[test]
     fn string_ownership() {
-        let mut str = "I'M A STRING".clone().to_owned();
-        let ptr = str.as_mut_ptr() as *mut i8;
+        let mut str = "I'M A STRING\0".to_owned();
+        let ptr = str.as_ptr() as *const i8;
         let copy = make_cstring(ptr);
+        assert_ne!(ptr, copy.as_ptr());
         str.make_ascii_lowercase();
         assert_eq!(copy.to_str().unwrap(), "I'M A STRING");
     }
 
     #[test]
     fn adding_to_hierarchy() {
-        let cls = "Package.Class".as_ptr() as *const i8;
+        let cls = "Package.Class\0".as_ptr() as *const i8;
         let mut dbg = Debugger::new();
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(
@@ -288,7 +296,7 @@ mod tests {
 
     #[test]
     fn clearing_hierarchy() {
-        let cls = "Package.Class".as_ptr() as *const i8;
+        let cls = "Package.Class\0".as_ptr() as *const i8;
         let mut dbg = Debugger::new();
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy.len(), 1);
@@ -298,8 +306,8 @@ mod tests {
 
     #[test]
     fn add_watches_are_independent() {
-        let name = "SomeVar".as_ptr() as *const i8;
-        let val = "10".as_ptr() as *const i8;
+        let name = "SomeVar\0".as_ptr() as *const i8;
+        let val = "10\0".as_ptr() as *const i8;
         let mut dbg = Debugger::new();
         assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 0);
         assert_eq!(dbg.local_watches.len(), 1);
@@ -317,8 +325,8 @@ mod tests {
 
     #[test]
     fn clear_watches_are_independent() {
-        let name = "SomeVar".as_ptr() as *const i8;
-        let val = "10".as_ptr() as *const i8;
+        let name = "SomeVar\0".as_ptr() as *const i8;
+        let val = "10\0".as_ptr() as *const i8;
         let mut dbg = Debugger::new();
         dbg.add_watch(WatchKind::Local, -1, name, val);
         dbg.add_watch(WatchKind::Global, -1, name, val);
@@ -332,15 +340,15 @@ mod tests {
     #[test]
     #[should_panic]
     fn add_watch_invalid_parent() {
-        let name = "SomeVar".as_ptr() as *const i8;
-        let val = "10".as_ptr() as *const i8;
+        let name = "SomeVar\0".as_ptr() as *const i8;
+        let val = "10\0".as_ptr() as *const i8;
         let mut dbg = Debugger::new();
         dbg.add_watch(WatchKind::Local, 0, name, val);
     }
 
     #[test]
     fn adds_breakpoint() {
-        let class_name = "SomeClass".as_ptr() as *const i8;
+        let class_name = "SomeClass\0".as_ptr() as *const i8;
         let mut dbg = Debugger::new();
         dbg.add_breakpoint(class_name, 10);
         assert_eq!(dbg.breakpoints.len(), 1);
@@ -348,7 +356,7 @@ mod tests {
 
     #[test]
     fn can_find_breakpoint() {
-        let class_name = "SomeClass".as_ptr() as *const i8;
+        let class_name = "SomeClass\0".as_ptr() as *const i8;
         let mut dbg = Debugger::new();
         dbg.add_breakpoint(class_name, 10);
         dbg.remove_breakpoint(class_name, 10);
@@ -357,8 +365,8 @@ mod tests {
 
     #[test]
     fn remove_unknown_breakpoint() {
-        let class_name = "SomeClass".as_ptr() as *const i8;
-        let another_name = "AnotherClass".as_ptr() as *const i8;
+        let class_name = "SomeClass\0".as_ptr() as *const i8;
+        let another_name = "AnotherClass\0".as_ptr() as *const i8;
         let mut dbg = Debugger::new();
         dbg.add_breakpoint(class_name, 10);
         dbg.remove_breakpoint(another_name, 20);
