@@ -105,7 +105,7 @@ impl UnrealscriptAdapter {
             .path
             .as_ref()
             .expect("Clients should provide sources as paths");
-        let class_info = split_source(path)?;
+        let class_info = ClassInfo::make(path.to_string()).or(Err(Error::InvalidFilename(path.to_string())))?;
         let mut class_name = class_info.qualify();
         class_name.make_ascii_uppercase();
         self.class_map.entry(class_name).or_insert(class_info);
@@ -128,9 +128,19 @@ pub struct ClassInfo {
     pub file_name: String,
     pub package_name: String,
     pub class_name: String,
+    pub breakpoints: Vec<i32>,
 }
 
+/// The filename does not conform to the Unreal path conventions for class naming.
+#[derive(Debug)]
+pub struct BadFilenameError;
+
 impl ClassInfo {
+
+    pub fn make(file_name: String) -> Result<ClassInfo, BadFilenameError> {
+        let (package_name, class_name) = split_source(&file_name)?;
+        Ok(ClassInfo { file_name, package_name, class_name, breakpoints: Vec::new() })
+    }
     /// Return a string containing a qualified classname: "package.class"
     pub fn qualify(&self) -> String {
         format!("{}.{}", self.package_name, self.class_name)
@@ -149,26 +159,20 @@ impl ClassInfo {
 /// scheme is mandatory: the Unreal debugger only talks about package and class names,
 /// and the client only talks about source files. The Unrealscript compiler uses these
 /// same conventions.
-pub fn split_source(path_str: &str) -> Result<ClassInfo, UnrealscriptAdapterError> {
+pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError> {
     let path = Path::new(&path_str);
     let mut iter = path.components().rev();
 
     // Isolate the filename. This is the last component of the path and should have an extension to
     // strip.
-    let component = iter.next().ok_or(Error::InvalidFilename(format!(
-        "Path {path_str} is missing a filename"
-    )))?;
+    let component = iter.next().ok_or(BadFilenameError)?;
     let class_name = match component {
         Component::Normal(file_name) => {
             Path::new(file_name)
                 .file_stem()
-                .ok_or(Error::InvalidFilename(format!(
-                    "Path {path_str} is missing an extension"
-                )))
+                .ok_or(BadFilenameError)
         }
-        _ => Err(Error::InvalidFilename(format!(
-            "Path {path_str} is missing a filename"
-        ))),
+        _ => Err(BadFilenameError)
     }?
     .to_str()
     .expect("Source path should be valid utf-8")
@@ -178,23 +182,15 @@ pub fn split_source(path_str: &str) -> Result<ClassInfo, UnrealscriptAdapterErro
     iter.next();
 
     // the package name should be the next component.
-    let component = iter.next().ok_or(Error::InvalidFilename(format!(
-        "Path {path_str} has no package"
-    )))?;
+    let component = iter.next().ok_or(BadFilenameError)?;
     let package_name = match component {
         Component::Normal(file_name) => Ok(file_name),
-        _ => Err(Error::InvalidFilename(format!(
-            "Path {path_str} is missing a filename"
-        ))),
+        _ => Err(BadFilenameError),
     }?
     .to_str()
     .expect("Source path should be vaild utf-8")
     .to_owned();
-    Ok(ClassInfo {
-        file_name: path_str.to_owned(),
-        package_name,
-        class_name,
-    })
+    Ok((package_name, class_name))
 }
 
 #[cfg(test)]
@@ -205,9 +201,9 @@ mod tests {
 
     #[test]
     fn can_split_source() {
-        let info = split_source("C:\\foo\\src\\MyPackage\\classes\\SomeClass.uc").unwrap();
-        assert_eq!(info.class_name, "SomeClass");
-        assert_eq!(info.package_name, "MyPackage");
+        let (package,class) = split_source("C:\\foo\\src\\MyPackage\\classes\\SomeClass.uc").unwrap();
+        assert_eq!(package, "MyPackage");
+        assert_eq!(class, "SomeClass");
     }
 
     #[test]
@@ -215,15 +211,15 @@ mod tests {
         let info = split_source("C:\\MyMod\\BadClass.uc");
         assert!(matches!(
             info,
-            Err(UnrealscriptAdapterError::InvalidFilename(_))
+            Err(BadFilenameError)
         ));
     }
 
     #[test]
     fn split_source_forward_slashes() {
-        let info = split_source("C:/foo/src/MyPackage/classes/SomeClass.uc").unwrap();
-        assert_eq!(info.class_name, "SomeClass");
-        assert_eq!(info.package_name, "MyPackage");
+        let (package, class) = split_source("C:/foo/src/MyPackage/classes/SomeClass.uc").unwrap();
+        assert_eq!(package, "MyPackage");
+        assert_eq!(class, "SomeClass");
     }
 
     #[test]
@@ -252,11 +248,7 @@ mod tests {
 
     #[test]
     fn qualify_name() {
-        let class = ClassInfo {
-            package_name: "package".to_string(),
-            file_name: "C:\\foo\\src\\package\\classes\\cls.uc".to_string(),
-            class_name: "cls".to_string(),
-        };
+        let class = ClassInfo::make("C:\\foo\\src\\package\\classes\\cls.uc".to_string()).unwrap();
         let qual = class.qualify();
         assert_eq!(qual, "package.cls")
     }

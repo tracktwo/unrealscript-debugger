@@ -6,6 +6,7 @@ use flexi_logger::{FileSpec, Logger};
 
 pub mod adapter;
 pub mod client;
+pub mod ipc;
 
 use client::UnrealscriptClient;
 
