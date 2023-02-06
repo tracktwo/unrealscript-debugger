@@ -87,7 +87,12 @@ pub extern "C" fn ClearAWatch(kind: i32) -> () {
 /// This is the only Unreal
 /// debugger API that returns a value.
 #[no_mangle]
-pub extern "C" fn AddAWatch(kind: i32, parent: i32, name: *const c_char, value: *const c_char) -> i32 {
+pub extern "C" fn AddAWatch(
+    kind: i32,
+    parent: i32,
+    name: *const c_char,
+    value: *const c_char,
+) -> i32 {
     trace!("AddAWatch {kind} {parent}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -95,7 +100,7 @@ pub extern "C" fn AddAWatch(kind: i32, parent: i32, name: *const c_char, value: 
         WatchKind::from_int(kind).expect("Unreal should never give us a bad watch kind."),
         parent,
         name,
-        value
+        value,
     )
 }
 
@@ -194,4 +199,3 @@ pub extern "C" fn DebugWindowState(code: i32) -> () {
 /// C types. These are converted internally to a slightly higher level for
 /// convenience, but with only minimal processing.
 pub mod debugger;
-

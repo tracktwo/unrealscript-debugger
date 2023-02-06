@@ -1,6 +1,10 @@
 use std::io::Write;
 
-use dap::{prelude::{BasicClient, Client, Context, Event}, responses::{ResponseBody, Response}, events::EventBody};
+use dap::{
+    events::EventBody,
+    prelude::{BasicClient, Client, Context, Event},
+    responses::{Response, ResponseBody},
+};
 
 pub struct UnrealscriptClient<W: Write> {
     client: BasicClient<W>,
@@ -8,7 +12,9 @@ pub struct UnrealscriptClient<W: Write> {
 
 impl<W: Write> UnrealscriptClient<W> {
     pub fn new(writer: W) -> UnrealscriptClient<W> {
-        return UnrealscriptClient { client: BasicClient::new(writer) }
+        return UnrealscriptClient {
+            client: BasicClient::new(writer),
+        };
     }
 }
 

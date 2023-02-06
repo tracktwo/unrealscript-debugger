@@ -1,6 +1,6 @@
+use core::time;
 use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
 use serde::{Deserialize, Serialize};
-use core::time;
 use std::ffi::{c_char, CStr, CString};
 use std::net::TcpListener;
 use std::{io, ptr};
@@ -105,7 +105,7 @@ impl Debugger {
             name: make_cstring(name),
             value: make_cstring(value),
         };
-        let vec:&mut Vec<Watch> = match kind {
+        let vec: &mut Vec<Watch> = match kind {
             WatchKind::Local => self.local_watches.as_mut(),
             WatchKind::Global => self.global_watches.as_mut(),
             WatchKind::User => self.user_watches.as_mut(),
@@ -121,26 +121,31 @@ impl Debugger {
         vec.len() as i32 - 1
     }
 
-    pub fn lock_watchlist(&mut self) -> () {
-    }
+    pub fn lock_watchlist(&mut self) -> () {}
 
-    pub fn unlock_watchlist(&mut self) -> () {
-    }
+    pub fn unlock_watchlist(&mut self) -> () {}
 
     pub fn add_breakpoint(&mut self, class_name: *const c_char, line: i32) -> () {
-        let bp = Breakpoint { 
+        let bp = Breakpoint {
             class_name: make_cstring(class_name),
-            line
+            line,
         };
         self.breakpoints.push(bp);
     }
 
     pub fn remove_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
         let str = make_cstr(name);
-        if let Some(idx) = self.breakpoints.iter().position(|val| val.class_name.as_c_str() == str && val.line == line) {
+        if let Some(idx) = self
+            .breakpoints
+            .iter()
+            .position(|val| val.class_name.as_c_str() == str && val.line == line)
+        {
             self.breakpoints.swap_remove(idx);
         } else {
-            log::error!("Could not find breakpoint {:#?}:{line}", str.to_string_lossy());
+            log::error!(
+                "Could not find breakpoint {:#?}:{line}",
+                str.to_string_lossy()
+            );
         }
     }
 
@@ -149,9 +154,9 @@ impl Debugger {
     }
 
     pub fn add_frame(&mut self, class_name: *const c_char, line: i32) -> () {
-        let frame = Frame { 
+        let frame = Frame {
             class_name: make_cstring(class_name),
-            line
+            line,
         };
         self.callstack.push(frame);
     }
@@ -232,9 +237,7 @@ fn handle_connection(_server: &mut TcpListener) -> Result<(), io::Error> {
 /// TODO: What about non-western game locales? What format text do we get?
 fn make_cstring(raw: *const c_char) -> Box<CString> {
     if raw != ptr::null() {
-        unsafe {
-            return Box::new(CStr::from_ptr(raw).clone().to_owned())
-        }
+        unsafe { return Box::new(CStr::from_ptr(raw).clone().to_owned()) }
     }
 
     Box::new(CString::new("").unwrap())
@@ -242,14 +245,11 @@ fn make_cstring(raw: *const c_char) -> Box<CString> {
 
 fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
     if raw != ptr::null() {
-        unsafe {
-            return CStr::from_ptr(raw)
-        }
+        unsafe { return CStr::from_ptr(raw) }
     }
 
     CStr::from_bytes_with_nul(b"\0").unwrap()
 }
-
 
 #[cfg(test)]
 mod tests {

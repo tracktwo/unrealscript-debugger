@@ -106,7 +106,8 @@ impl UnrealscriptAdapter {
             .as_ref()
             .expect("Clients should provide sources as paths");
         let class_info = split_source(path)?;
-        let class_name = class_info.class_name.to_uppercase();
+        let mut class_name = class_info.qualify();
+        class_name.make_ascii_uppercase();
         self.class_map.entry(class_name).or_insert(class_info);
 
         if let Some(breakpoints) = &args.breakpoints {
@@ -127,6 +128,13 @@ pub struct ClassInfo {
     pub file_name: String,
     pub package_name: String,
     pub class_name: String,
+}
+
+impl ClassInfo {
+    /// Return a string containing a qualified classname: "package.class"
+    pub fn qualify(&self) -> String {
+        format!("{}.{}", self.package_name, self.class_name)
+    }
 }
 
 /// Process a Source entry to obtain information about a class.
@@ -238,6 +246,18 @@ mod tests {
             source_modified: None,
         };
         let _response = adapter.set_breakpoints(&args);
-        assert!(adapter.class_map.contains_key("CLASSNAME"));
+        // Class cache should be keyed on UPCASED qualified names.
+        assert!(adapter.class_map.contains_key("SOMEPACKAGE.CLASSNAME"));
+    }
+
+    #[test]
+    fn qualify_name() {
+        let class = ClassInfo {
+            package_name: "package".to_string(),
+            file_name: "C:\\foo\\src\\package\\classes\\cls.uc".to_string(),
+            class_name: "cls".to_string(),
+        };
+        let qual = class.qualify();
+        assert_eq!(qual, "package.cls")
     }
 }
