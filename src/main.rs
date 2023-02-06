@@ -18,7 +18,7 @@ fn main() {
         .start()
         .unwrap();
 
-    let adapter = UnrealscriptAdapter {};
+    let adapter = UnrealscriptAdapter::new();
     let client = UnrealscriptClient::new(std::io::stdout());
     let mut server = Server::new(adapter, client);
 

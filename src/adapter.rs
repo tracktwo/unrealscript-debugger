@@ -1,3 +1,8 @@
+use std::{
+    collections::BTreeMap,
+    path::{Component, Path},
+};
+
 use dap::{
     prelude::*,
     requests::{InitializeArguments, SetBreakpointsArguments},
@@ -6,18 +11,32 @@ use dap::{
 };
 use thiserror::Error;
 
-pub struct UnrealscriptAdapter;
+pub struct UnrealscriptAdapter {
+    class_map: BTreeMap<String, ClassInfo>,
+}
+
+impl UnrealscriptAdapter {
+    pub fn new() -> UnrealscriptAdapter {
+        UnrealscriptAdapter {
+            class_map: BTreeMap::new(),
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum UnrealscriptAdapterError {
     #[error("Unhandled command: {0}")]
     UnhandledCommandError(String),
+
+    #[error("Invalid filename: {0}")]
+    InvalidFilename(String),
 }
 
 impl UnrealscriptAdapterError {
     fn id(&self) -> i64 {
         match self {
             UnrealscriptAdapterError::UnhandledCommandError(_) => 1,
+            UnrealscriptAdapterError::InvalidFilename(_) => 2,
         }
     }
 
@@ -29,6 +48,8 @@ impl UnrealscriptAdapterError {
         }
     }
 }
+
+type Error = UnrealscriptAdapterError;
 
 impl Adapter for UnrealscriptAdapter {
     type Error = UnrealscriptAdapterError;
@@ -72,12 +93,24 @@ impl UnrealscriptAdapter {
     }
 
     fn set_breakpoints(
-        &self,
+        &mut self,
         args: &SetBreakpointsArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         log::info!("Set breakpoints request");
+
+        // Break the source file out into sections and record it in our map of
+        // known classes if necessary.
+        let path = args
+            .source
+            .path
+            .as_ref()
+            .expect("Clients should provide sources as paths");
+        let class_info = split_source(path)?;
+        let class_name = class_info.class_name.to_uppercase();
+        self.class_map.entry(class_name).or_insert(class_info);
+
         if let Some(breakpoints) = &args.breakpoints {
-            for bp in breakpoints {
+            for _bp in breakpoints {
                 // Ask the debugger to set each breapoint in turn, and wait for the corresponding
                 // response message to be delivered.
             }
@@ -85,5 +118,126 @@ impl UnrealscriptAdapter {
         Err(UnrealscriptAdapterError::UnhandledCommandError(
             "setBreakpoints".to_string(),
         ))
+    }
+}
+
+/// Information about a class.
+#[derive(Debug)]
+pub struct ClassInfo {
+    pub file_name: String,
+    pub package_name: String,
+    pub class_name: String,
+}
+
+/// Process a Source entry to obtain information about a class.
+///
+/// For Unrealscript the details of a class can be determined from its source file.
+/// Given a Source entry with a full path to a source file we expect the path to always
+/// be of the form:
+///
+/// <arbitrary leading directories>\Src\PackageName\Classes\ClassName.uc
+///
+/// From a path of this form we can isolate the package and class names. This naming
+/// scheme is mandatory: the Unreal debugger only talks about package and class names,
+/// and the client only talks about source files. The Unrealscript compiler uses these
+/// same conventions.
+pub fn split_source(path_str: &str) -> Result<ClassInfo, UnrealscriptAdapterError> {
+    let path = Path::new(&path_str);
+    let mut iter = path.components().rev();
+
+    // Isolate the filename. This is the last component of the path and should have an extension to
+    // strip.
+    let component = iter.next().ok_or(Error::InvalidFilename(format!(
+        "Path {path_str} is missing a filename"
+    )))?;
+    let class_name = match component {
+        Component::Normal(file_name) => {
+            Path::new(file_name)
+                .file_stem()
+                .ok_or(Error::InvalidFilename(format!(
+                    "Path {path_str} is missing an extension"
+                )))
+        }
+        _ => Err(Error::InvalidFilename(format!(
+            "Path {path_str} is missing a filename"
+        ))),
+    }?
+    .to_str()
+    .expect("Source path should be valid utf-8")
+    .to_owned();
+
+    // Skip the parent
+    iter.next();
+
+    // the package name should be the next component.
+    let component = iter.next().ok_or(Error::InvalidFilename(format!(
+        "Path {path_str} has no package"
+    )))?;
+    let package_name = match component {
+        Component::Normal(file_name) => Ok(file_name),
+        _ => Err(Error::InvalidFilename(format!(
+            "Path {path_str} is missing a filename"
+        ))),
+    }?
+    .to_str()
+    .expect("Source path should be vaild utf-8")
+    .to_owned();
+    Ok(ClassInfo {
+        file_name: path_str.to_owned(),
+        package_name,
+        class_name,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use dap::types::Source;
+
+    use super::*;
+
+    #[test]
+    fn can_split_source() {
+        let info = split_source("C:\\foo\\src\\MyPackage\\classes\\SomeClass.uc").unwrap();
+        assert_eq!(info.class_name, "SomeClass");
+        assert_eq!(info.package_name, "MyPackage");
+    }
+
+    #[test]
+    fn split_source_bad_classname() {
+        let info = split_source("C:\\MyMod\\BadClass.uc");
+        assert!(matches!(
+            info,
+            Err(UnrealscriptAdapterError::InvalidFilename(_))
+        ));
+    }
+
+    #[test]
+    fn split_source_forward_slashes() {
+        let info = split_source("C:/foo/src/MyPackage/classes/SomeClass.uc").unwrap();
+        assert_eq!(info.class_name, "SomeClass");
+        assert_eq!(info.package_name, "MyPackage");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn add_breakpoint_registers_class() {
+        let mut adapter = UnrealscriptAdapter::new();
+        let args = SetBreakpointsArguments {
+            source: Source {
+                name: None,
+                path: Some("C:\\Projects\\Src\\SomePackage\\Classes\\Classname.uc".to_string()),
+                source_reference: None,
+                presentation_hint: None,
+                origin: None,
+                sources: None,
+                adapter_data: None,
+                checksums: None,
+            },
+            lines: None,
+            breakpoints: None,
+            source_modified: None,
+        };
+        let _response = adapter.set_breakpoints(&args);
+        assert!(adapter.class_map.contains_key("CLASSNAME"));
     }
 }
