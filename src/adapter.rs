@@ -7,7 +7,7 @@ use dap::{
     prelude::*,
     requests::{InitializeArguments, SetBreakpointsArguments},
     responses::ErrorMessage,
-    types::{Capabilities, Source},
+    types::{Capabilities, Source, Thread},
 };
 use thiserror::Error;
 
@@ -66,6 +66,7 @@ impl Adapter for UnrealscriptAdapter {
         let response = match &request.command {
             Command::Initialize(args) => self.initialize(args),
             Command::SetBreakpoints(args) => self.set_breakpoints(args),
+            Command::Threads => self.threads(),
             Command::ConfigurationDone => {
                 return Ok(Response::make_ack(ctx.next_seq(), &request)
                     .expect("ConfigurationDone can be acked"))
@@ -73,6 +74,11 @@ impl Adapter for UnrealscriptAdapter {
             Command::Attach(_) => {
                 return Ok(
                     Response::make_ack(ctx.next_seq(), &request).expect("attach can be acked")
+                )
+            }
+            Command::Disconnect(_args) => {
+                return Ok(
+                    Response::make_ack(ctx.next_seq(), &request).expect("disconnect can be acked")
                 )
             }
             _ => Err(UnrealscriptAdapterError::UnhandledCommandError(
@@ -185,6 +191,17 @@ impl UnrealscriptAdapter {
             },
         ))
     }
+
+    /// Handle a threads request
+    fn threads(&mut self) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        log::info!("Threads request");
+        Ok(ResponseBody::Threads(responses::ThreadsResponse {
+            threads: vec![Thread {
+                id: 1,
+                name: "main".to_string(),
+            }],
+        }))
+    }
 }
 
 /// Information about a class.
@@ -210,6 +227,7 @@ impl ClassInfo {
             breakpoints: Vec::new(),
         })
     }
+
     /// Return a string containing a qualified classname: "package.class"
     pub fn qualify(&self) -> String {
         format!("{}.{}", self.package_name, self.class_name)
