@@ -10,3 +10,4 @@
 /// The functions in this interface are thin wrappers that simply pass their
 /// arguments on to corresponding methods on the debugger state instance.
 pub mod interface;
+pub mod ipc;

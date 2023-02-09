@@ -5,7 +5,7 @@ use std::{
 
 use dap::{
     prelude::*,
-    requests::{InitializeArguments, SetBreakpointsArguments},
+    requests::{AttachRequestArguments, InitializeArguments, SetBreakpointsArguments},
     responses::ErrorMessage,
     types::{Capabilities, Source, Thread},
 };
@@ -15,7 +15,7 @@ use crate::ipc::{Breakpoint, UnrealChannel};
 
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
-    channel: UnrealChannel,
+    channel: Option<UnrealChannel>,
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
     one_based_lines: bool,
@@ -25,7 +25,7 @@ impl UnrealscriptAdapter {
     pub fn new() -> UnrealscriptAdapter {
         UnrealscriptAdapter {
             class_map: BTreeMap::new(),
-            channel: UnrealChannel::new(),
+            channel: None,
             one_based_lines: true,
         }
     }
@@ -38,6 +38,9 @@ pub enum UnrealscriptAdapterError {
 
     #[error("Invalid filename: {0}")]
     InvalidFilename(String),
+
+    #[error("Not connected")]
+    NotConnected,
 }
 
 impl UnrealscriptAdapterError {
@@ -45,6 +48,7 @@ impl UnrealscriptAdapterError {
         match self {
             UnrealscriptAdapterError::UnhandledCommandError(_) => 1,
             UnrealscriptAdapterError::InvalidFilename(_) => 2,
+            UnrealscriptAdapterError::NotConnected => 3,
         }
     }
 
@@ -71,11 +75,7 @@ impl Adapter for UnrealscriptAdapter {
                 return Ok(Response::make_ack(ctx.next_seq(), &request)
                     .expect("ConfigurationDone can be acked"))
             }
-            Command::Attach(_) => {
-                return Ok(
-                    Response::make_ack(ctx.next_seq(), &request).expect("attach can be acked")
-                )
-            }
+            Command::Attach(args) => self.attach(args),
             Command::Disconnect(_args) => {
                 return Ok(
                     Response::make_ack(ctx.next_seq(), &request).expect("disconnect can be acked")
@@ -124,6 +124,10 @@ impl UnrealscriptAdapter {
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         log::info!("Set breakpoints request");
 
+        // If we are not connected we cannot proceed
+        if self.channel.is_none() {
+            return Err(UnrealscriptAdapterError::NotConnected);
+        }
         // Break the source file out into sections and record it in our map of
         // known classes if necessary.
         let path = args
@@ -133,17 +137,19 @@ impl UnrealscriptAdapter {
             .expect("Clients should provide sources as paths");
         let class_info =
             ClassInfo::make(path.to_string()).or(Err(Error::InvalidFilename(path.to_string())))?;
-        let mut class_name = class_info.qualify();
-        class_name.make_ascii_uppercase();
+        let mut qualified_class_name = class_info.qualify();
+        qualified_class_name.make_ascii_uppercase();
         let class_info = self
             .class_map
-            .entry(class_name.clone())
+            .entry(qualified_class_name.clone())
             .or_insert(class_info);
         // Remove all the existing breakpoints from this class.
         for bp in class_info.breakpoints.iter() {
             let removed = self
                 .channel
-                .remove_breakpoint(Breakpoint::new(&class_name, *bp));
+                .as_mut()
+                .unwrap()
+                .remove_breakpoint(Breakpoint::new(&qualified_class_name, *bp));
             assert!(removed.line == *bp);
         }
 
@@ -154,7 +160,6 @@ impl UnrealscriptAdapter {
         // Now add the new ones (if any)
         if let Some(breakpoints) = &args.breakpoints {
             for bp in breakpoints {
-                // TODO Handle 0-or-1 line numbering.
                 // Note that Unreal only accepts 32-bit lines.
                 if let Ok(mut line) = bp.line.try_into() {
                     // The line number received may require adjustment
@@ -162,7 +167,9 @@ impl UnrealscriptAdapter {
 
                     let new_bp = self
                         .channel
-                        .add_breakpoint(Breakpoint::new(&class_name, line));
+                        .as_mut()
+                        .unwrap()
+                        .add_breakpoint(Breakpoint::new(&qualified_class_name, line));
 
                     // Record this breakpoint in our data structure
                     class_info.breakpoints.push(new_bp.line);
@@ -201,6 +208,18 @@ impl UnrealscriptAdapter {
                 name: "main".to_string(),
             }],
         }))
+    }
+
+    /// Attach to a running unreal process
+    fn attach(
+        &mut self,
+        _args: &AttachRequestArguments,
+    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        log::info!("Attach request");
+
+        // Connect to the unrealscript interface and set up the communications channel between
+        // it and this adapter.
+        Ok(ResponseBody::Attach)
     }
 }
 
@@ -307,6 +326,8 @@ mod tests {
     #[allow(deprecated)]
     fn add_breakpoint_registers_class() {
         let mut adapter = UnrealscriptAdapter::new();
+        // TODO This will need to be mocked for testing.
+        adapter.channel = Some(UnrealChannel::new());
         let args = SetBreakpointsArguments {
             source: Source {
                 name: None,
@@ -322,7 +343,7 @@ mod tests {
             breakpoints: None,
             source_modified: None,
         };
-        let _response = adapter.set_breakpoints(&args);
+        let _response = adapter.set_breakpoints(&args).unwrap();
         // Class cache should be keyed on UPCASED qualified names.
         assert!(adapter.class_map.contains_key("SOMEPACKAGE.CLASSNAME"));
     }

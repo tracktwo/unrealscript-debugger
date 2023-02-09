@@ -1,6 +1,5 @@
 use core::time;
 use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
-use serde::{Deserialize, Serialize};
 use std::ffi::{c_char, CStr, CString};
 use std::net::TcpListener;
 use std::{io, ptr};
@@ -8,6 +7,7 @@ use std::{sync::Mutex, thread};
 
 use super::UnrealCallback;
 use super::DEBUGGER;
+use crate::ipc::UnrealCommand;
 
 const PORT: i32 = 18777;
 
@@ -197,36 +197,52 @@ pub fn init_logger() -> Result<(), FlexiLoggerError> {
     Ok(())
 }
 
+/// The main loop of the debugger interface. This runs in an independent thread from Unreal.
+///
+/// This thread will process incoming commands from the debugger adapter and dispatch them through
+/// the callback to unreal. This thread lives for the entire lifetime of the Unreal process with no
+/// mechanism to end it. The Unreal debugger interface API does not have a mechanism to shut down
+/// the interface, it'll just kill us when the process ends. This means this thread and loop may
+/// survive multiple debugging "sessions". The 'toggledebugger' unreal command can disable an
+/// active debugger and then another one can turn it back on again. This loop persists over those
+/// stattes, although we will disconnect any active adapter when we shut down.
 fn main_loop(cb: UnrealCallback) -> () {
     // Start listening on a socket for connections from the adapter.
     let mut server = TcpListener::bind(format!("127.0.0.1:{PORT}")).expect("Failed to bind port");
 
-    // Sleep for 5 seconds
-    std::thread::sleep(time::Duration::from_secs(5));
-
-    // Set a breakpoint
-    cb(b"addbreakpoint EvacAll_WotC.X2Ability_EvacAll 100\0".as_ptr());
     loop {
-        match handle_connection(&mut server) {
-            // TODO Logging
+        match handle_connection(&mut server, cb) {
             Ok(_) => {}
-            Err(_) => {}
+            Err(e) => {
+                log::error!("Error communicating with adapter: {e}");
+            }
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-enum InterfaceMessage {
-    Next,
-    Continue,
-}
+/// Accept one connection from the debugger adapter and process commands from it until it
+/// disconects.
+///
+/// We accept only a single connection at a time, if multiple adapters attempt to connect
+/// we'll process them in sequence.
+fn handle_connection(server: &mut TcpListener, cb: UnrealCallback) -> Result<(), io::Error> {
+    let (stream, addr) = server.accept()?;
+    log::info!("Received connection from {addr}");
 
-fn handle_connection(_server: &mut TcpListener) -> Result<(), io::Error> {
-    // loop {
-    //     let (stream, addr) = server.accept()?;
-    // }
+    let mut deserializer = serde_json::Deserializer::from_reader(stream).into_iter::<UnrealCommand>();
+    while let Some(command) = deserializer.next() {
+        // TODO Probably move this into the debugger and take a lock here for processing?
+        match command? { 
+            UnrealCommand::Initialize(path) => (),
+            UnrealCommand::SetBreakpoint(bp) => (),
+            UnrealCommand::RemoveBreakpoint(bp) => (),
+        }
+    }
     Ok(())
 }
+
+#[derive(Debug)]
+pub struct UnknownCommandError;
 
 /// Given a pointer to a string from Unreal, return a boxed CStr with the
 /// same contents. This interface deals only with CStrs, since Unreal does not
