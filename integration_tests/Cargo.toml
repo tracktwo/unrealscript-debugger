@@ -3,11 +3,11 @@ name = "tests"
 version = "0.0.0"
 edition = "2021"
 
-[dependencies]
+[dev-dependencies]
 common.workspace = true
 adapter.workspace = true
 interface.workspace = true
-dap.workspace = true
+dap = { git = "https://github.com/tracktwo/dap-rs", branch = "mods" }
 
 [[test]]
 name="breakpoints"
