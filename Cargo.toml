@@ -1,8 +1,8 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "integration_tests"]
 
 [workspace.dependencies]
 common = { path = "./crates/common", version="0.0.0" }
 interface = { path = "./crates/interface", version="0.0.0" }
 adapter = { path = "./crates/adapter", version="0.0.0" }
-
+dap = { path = "./crates/dap-rs", version="0.2.0-alpha1" }

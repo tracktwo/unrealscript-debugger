@@ -1,19 +1,16 @@
-pub mod adapter;
-pub mod client;
-
 use std::io::BufReader;
 
 use adapter::UnrealscriptAdapter;
 use dap::prelude::*;
 use flexi_logger::{FileSpec, Logger};
 
-use client::UnrealscriptClient;
+use adapter::client::UnrealscriptClient;
 
 fn main() {
     let _logger = Logger::try_with_env_or_str("trace")
         .unwrap()
         .log_to_file(FileSpec::default().directory(
-            "C:\\users\\jonat\\projects\\debugger\\unrealscript-debugger-interface\\logs",
+            "C:\\users\\jonat\\projects\\debugger\\logs",
         ))
         .start()
         .unwrap();
