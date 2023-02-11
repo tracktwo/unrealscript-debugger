@@ -1,21 +1,8 @@
-[package]
-name = "unrealscript-debugger-interface"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+members = ["crates/*"]
 
-[dependencies]
-flexi_logger = "0.24"
-log = "0.4"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-ipmpsc = "0.5"
-thiserror = "1.0"
-dap = { path = "dap-rs" }
-
-[[bin]]
-name = "unrealscript-debug-adapter"
-path = "src/main.rs"
-
-[lib]
-crate-type = ["cdylib"]
+[workspace.dependencies]
+common = { path = "./crates/common", version="0.0.0" }
+interface = { path = "./crates/interface", version="0.0.0" }
+adapter = { path = "./crates/adapter", version="0.0.0" }
 

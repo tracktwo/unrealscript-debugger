@@ -11,7 +11,7 @@ use dap::{
 };
 use thiserror::Error;
 
-use crate::ipc::{Breakpoint, UnrealChannel};
+use common::{Breakpoint, UnrealChannel};
 
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
@@ -323,6 +323,13 @@ mod tests {
     }
 
     #[test]
+    fn qualify_name() {
+        let class = ClassInfo::make("C:\\foo\\src\\package\\classes\\cls.uc".to_string()).unwrap();
+        let qual = class.qualify();
+        assert_eq!(qual, "package.cls")
+    }
+
+    #[test]
     #[allow(deprecated)]
     fn add_breakpoint_registers_class() {
         let mut adapter = UnrealscriptAdapter::new();
@@ -346,12 +353,5 @@ mod tests {
         let _response = adapter.set_breakpoints(&args).unwrap();
         // Class cache should be keyed on UPCASED qualified names.
         assert!(adapter.class_map.contains_key("SOMEPACKAGE.CLASSNAME"));
-    }
-
-    #[test]
-    fn qualify_name() {
-        let class = ClassInfo::make("C:\\foo\\src\\package\\classes\\cls.uc".to_string()).unwrap();
-        let qual = class.qualify();
-        assert_eq!(qual, "package.cls")
     }
 }

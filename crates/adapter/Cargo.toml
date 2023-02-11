@@ -1,0 +1,18 @@
+[package]
+name = "adapter"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+flexi_logger = "0.24"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ipmpsc = "0.5"
+thiserror = "1.0"
+dap = { path = "dap-rs" }
+common.workspace = true
+
+[[bin]]
+path = "src/main.rs"
+name = "unrealscript-debugger-adapter"

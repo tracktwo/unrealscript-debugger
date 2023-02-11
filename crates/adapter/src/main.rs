@@ -1,12 +1,11 @@
+pub mod adapter;
+pub mod client;
+
 use std::io::BufReader;
 
 use adapter::UnrealscriptAdapter;
 use dap::prelude::*;
 use flexi_logger::{FileSpec, Logger};
-
-pub mod adapter;
-pub mod client;
-pub mod ipc;
 
 use client::UnrealscriptClient;
 
