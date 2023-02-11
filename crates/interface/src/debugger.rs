@@ -223,7 +223,7 @@ fn main_loop(cb: UnrealCallback) -> () {
 ///
 /// We accept only a single connection at a time, if multiple adapters attempt to connect
 /// we'll process them in sequence.
-fn handle_connection(server: &mut TcpListener, cb: UnrealCallback) -> Result<(), io::Error> {
+fn handle_connection(server: &mut TcpListener, _cb: UnrealCallback) -> Result<(), io::Error> {
     let (stream, addr) = server.accept()?;
     log::info!("Received connection from {addr}");
 
@@ -231,9 +231,9 @@ fn handle_connection(server: &mut TcpListener, cb: UnrealCallback) -> Result<(),
     while let Some(command) = deserializer.next() {
         // TODO Probably move this into the debugger and take a lock here for processing?
         match command? { 
-            UnrealCommand::Initialize(path) => (),
-            UnrealCommand::SetBreakpoint(bp) => (),
-            UnrealCommand::RemoveBreakpoint(bp) => (),
+            UnrealCommand::Initialize(_) => (),
+            UnrealCommand::SetBreakpoint(_) => (),
+            UnrealCommand::RemoveBreakpoint(_) => (),
         }
     }
     Ok(())

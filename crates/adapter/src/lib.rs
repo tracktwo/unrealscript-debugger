@@ -336,32 +336,43 @@ mod tests {
         }
     }
 
+    const GOOD_PATH: &str = if cfg!(windows) {
+            "C:\\foo\\src\\MyPackage\\classes\\SomeClass.uc"
+        } else {
+            "/home/somebody/src/MyPackage/classes/SomeClass.uc"
+        };
+
     #[test]
     fn can_split_source() {
         let (package, class) =
-            split_source("C:\\foo\\src\\MyPackage\\classes\\SomeClass.uc").unwrap();
+            split_source(GOOD_PATH).unwrap();
         assert_eq!(package, "MyPackage");
         assert_eq!(class, "SomeClass");
     }
 
     #[test]
     fn split_source_bad_classname() {
-        let info = split_source("C:\\MyMod\\BadClass.uc");
+        let path = if cfg!(windows) {
+            "C:\\MyMod\\BadClass.uc"
+        } else {
+            "/MyMod/BadClass.uc"
+        };
+        let info = split_source(path);
         assert!(matches!(info, Err(BadFilenameError)));
     }
 
     #[test]
     fn split_source_forward_slashes() {
-        let (package, class) = split_source("C:/foo/src/MyPackage/classes/SomeClass.uc").unwrap();
+        let (package, class) = split_source(GOOD_PATH).unwrap();
         assert_eq!(package, "MyPackage");
         assert_eq!(class, "SomeClass");
     }
 
     #[test]
     fn qualify_name() {
-        let class = ClassInfo::make("C:\\foo\\src\\package\\classes\\cls.uc".to_string()).unwrap();
+        let class = ClassInfo::make(GOOD_PATH.to_string()).unwrap();
         let qual = class.qualify();
-        assert_eq!(qual, "package.cls")
+        assert_eq!(qual, "MyPackage.SomeClass")
     }
 
     #[test]
@@ -372,7 +383,7 @@ mod tests {
         let args = SetBreakpointsArguments {
             source: Source {
                 name: None,
-                path: Some("C:\\Projects\\Src\\SomePackage\\Classes\\Classname.uc".to_string()),
+                path: Some(GOOD_PATH.to_string()),
                 source_reference: None,
                 presentation_hint: None,
                 origin: None,
@@ -386,6 +397,6 @@ mod tests {
         };
         let _response = adapter.set_breakpoints(&args).unwrap();
         // Class cache should be keyed on UPCASED qualified names.
-        assert!(adapter.class_map.contains_key("SOMEPACKAGE.CLASSNAME"));
+        assert!(adapter.class_map.contains_key("MYPACKAGE.SOMECLASS"));
     }
 }

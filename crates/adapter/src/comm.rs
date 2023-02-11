@@ -51,7 +51,7 @@ impl UnrealChannel for DefaultChannel {
 
 /// Connect to an unreal debugger adapter running at the given port number on the local computer.
 pub fn connect(port: i32) -> Result<Box<dyn UnrealChannel>,ConnectionError> {
-    let mut stream = TcpStream::connect("127.0.0.1:{port}").or(Err(ConnectionError{}))?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).or(Err(ConnectionError{}))?;
 
     Ok(Box::new(DefaultChannel{}))
 }
