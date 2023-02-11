@@ -35,8 +35,8 @@ pub trait UnrealChannel : Send + 'static {
 ///  asynchronous events. These can occur at any time in unpredictable orders.
 ///  - Synchronous communication of command to one or more responses can be done on the adapter's
 ///  main message processing thread.
-struct DefaultChannel {
-
+pub struct DefaultChannel {
+    pub tcp: TcpStream,
 }
 
 impl UnrealChannel for DefaultChannel {
@@ -51,7 +51,7 @@ impl UnrealChannel for DefaultChannel {
 
 /// Connect to an unreal debugger adapter running at the given port number on the local computer.
 pub fn connect(port: i32) -> Result<Box<dyn UnrealChannel>,ConnectionError> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).or(Err(ConnectionError{}))?;
+    let stream = TcpStream::connect(format!("127.0.0.1:{port}")).or(Err(ConnectionError{}))?;
 
-    Ok(Box::new(DefaultChannel{}))
+    Ok(Box::new(DefaultChannel{tcp: stream}))
 }

@@ -1,4 +1,5 @@
 use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
+use ipmpsc::SharedRingBuffer;
 use std::ffi::{c_char, CStr, CString};
 use std::net::TcpListener;
 use std::{io, ptr};
@@ -6,8 +7,8 @@ use std::{sync::Mutex, thread};
 
 use super::UnrealCallback;
 use super::DEBUGGER;
-use common::DEFAULT_PORT;
 use common::UnrealCommand;
+use common::DEFAULT_PORT;
 
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 
@@ -23,20 +24,20 @@ pub struct Debugger {
 }
 
 /// A variable watch.
-struct Watch {
+pub struct Watch {
     parent: i32,
     name: Box<CString>,
     value: Box<CString>,
 }
 
 /// A breakpoint, verified by Unreal.
-struct Breakpoint {
+pub struct Breakpoint {
     class_name: Box<CString>,
     line: i32,
 }
 
 /// A callstack frame.
-struct Frame {
+pub struct Frame {
     class_name: Box<CString>,
     line: i32,
 }
@@ -60,7 +61,7 @@ impl WatchKind {
 }
 
 impl Debugger {
-    fn new() -> Debugger {
+    pub fn new() -> Debugger {
         Debugger {
             class_hierarchy: Vec::new(),
             local_watches: Vec::new(),
@@ -69,6 +70,14 @@ impl Debugger {
             breakpoints: Vec::new(),
             callstack: Vec::new(),
             current_object_name: None,
+        }
+    }
+
+    pub fn handle_command(&mut self, command: UnrealCommand) -> () {
+        match command {
+            UnrealCommand::Initialize(_path) => (),
+            UnrealCommand::SetBreakpoint(_) => (),
+            UnrealCommand::RemoveBreakpoint(_) => (),
         }
     }
 
@@ -206,7 +215,8 @@ pub fn init_logger() -> Result<(), FlexiLoggerError> {
 /// stattes, although we will disconnect any active adapter when we shut down.
 fn main_loop(cb: UnrealCallback) -> () {
     // Start listening on a socket for connections from the adapter.
-    let mut server = TcpListener::bind(format!("127.0.0.1:{DEFAULT_PORT}")).expect("Failed to bind port");
+    let mut server =
+        TcpListener::bind(format!("127.0.0.1:{DEFAULT_PORT}")).expect("Failed to bind port");
 
     loop {
         match handle_connection(&mut server, cb) {
@@ -227,14 +237,12 @@ fn handle_connection(server: &mut TcpListener, _cb: UnrealCallback) -> Result<()
     let (stream, addr) = server.accept()?;
     log::info!("Received connection from {addr}");
 
-    let mut deserializer = serde_json::Deserializer::from_reader(stream).into_iter::<UnrealCommand>();
+    let mut deserializer =
+        serde_json::Deserializer::from_reader(stream).into_iter::<UnrealCommand>();
     while let Some(command) = deserializer.next() {
-        // TODO Probably move this into the debugger and take a lock here for processing?
-        match command? { 
-            UnrealCommand::Initialize(_) => (),
-            UnrealCommand::SetBreakpoint(_) => (),
-            UnrealCommand::RemoveBreakpoint(_) => (),
-        }
+        let mut hnd = DEBUGGER.lock().unwrap();
+        let dbg = hnd.as_mut().unwrap();
+        dbg.handle_command(command?);
     }
     Ok(())
 }

@@ -1,4 +1,3 @@
-
 pub mod client;
 
 mod comm;
@@ -224,11 +223,7 @@ impl UnrealscriptAdapter {
 
     // Extract the port number from an attach arguments value map.
     fn extract_port(value: &Option<Value>) -> Option<i32> {
-        value.as_ref()?
-        ["port"]
-        .as_i64()?
-        .try_into()
-        .ok()
+        value.as_ref()?["port"].as_i64()?.try_into().ok()
     }
 
     /// Attach to a running unreal process
@@ -241,8 +236,9 @@ impl UnrealscriptAdapter {
         let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
         // Connect to the unrealscript interface and set up the communications channel between
         // it and this adapter.
-        self.channel = Some(comm::connect(port).or(Err(UnrealscriptAdapterError::ConnectionError))?);
-        
+        self.channel =
+            Some(comm::connect(port).or(Err(UnrealscriptAdapterError::ConnectionError))?);
+
         Ok(ResponseBody::Attach)
     }
 }
@@ -337,15 +333,14 @@ mod tests {
     }
 
     const GOOD_PATH: &str = if cfg!(windows) {
-            "C:\\foo\\src\\MyPackage\\classes\\SomeClass.uc"
-        } else {
-            "/home/somebody/src/MyPackage/classes/SomeClass.uc"
-        };
+        "C:\\foo\\src\\MyPackage\\classes\\SomeClass.uc"
+    } else {
+        "/home/somebody/src/MyPackage/classes/SomeClass.uc"
+    };
 
     #[test]
     fn can_split_source() {
-        let (package, class) =
-            split_source(GOOD_PATH).unwrap();
+        let (package, class) = split_source(GOOD_PATH).unwrap();
         assert_eq!(package, "MyPackage");
         assert_eq!(class, "SomeClass");
     }
@@ -379,7 +374,7 @@ mod tests {
     #[allow(deprecated)]
     fn add_breakpoint_registers_class() {
         let mut adapter = UnrealscriptAdapter::new();
-        adapter.channel = Some(Box::new(MockChannel{}));
+        adapter.channel = Some(Box::new(MockChannel {}));
         let args = SetBreakpointsArguments {
             source: Source {
                 name: None,

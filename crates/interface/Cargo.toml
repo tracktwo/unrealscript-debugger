@@ -13,5 +13,5 @@ thiserror = "1.0"
 common.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["lib", "cdylib"]
 path = "src/lib.rs"

@@ -8,6 +8,9 @@ common.workspace = true
 adapter.workspace = true
 interface.workspace = true
 dap = { git = "https://github.com/tracktwo/dap-rs", branch = "mods" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ipmpsc = "0.5"
 
 [[test]]
 name="breakpoints"

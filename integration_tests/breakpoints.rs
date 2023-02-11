@@ -1,19 +1,46 @@
 //! Integration tests for communications between the adapter and interface.
 
 use adapter::{client::UnrealscriptClient, UnrealscriptAdapter};
+use common::{UnrealCommand, UnrealEvent};
+use ipmpsc::SharedRingBuffer;
+use serde_json::{Value, Map, json};
+use std::net::TcpListener;
+use std::thread;
 use dap::{
     prelude::*,
     requests::{Command, Request},
     types::{Source, SourceBreakpoint},
 };
+use interface::debugger::Debugger;
 
 /// Set a breakpoint and then mock hitting it, ensuring we get a break event at the
 /// expected position.
+
+const PACKAGE_CLASSNAME: &str = if cfg!(windows) {
+    "C:\\foo\\Src\\Package\\Classes\\Classname.uc"
+} else {
+    "/home/username/src/Package/Classes/Classname.uc"
+};
+
 #[test]
 #[allow(deprecated)]
 fn hit_breakpoint() {
     let mut adapter = UnrealscriptAdapter::new();
     let mut client = UnrealscriptClient::new(std::io::stdout());
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+
+    let _interface_thread = thread::spawn(move || {
+        let mut dbg = Debugger::new();
+        let (stream, _addr) = server.accept().unwrap();
+        let mut deserializer = serde_json::Deserializer::from_reader(stream.try_clone().unwrap()).into_iter::<UnrealCommand>();
+        let serializer = serde_json::Serializer::new(stream);
+
+        // First command should be an initialize
+        let command = deserializer.next().unwrap().unwrap();
+        assert!(matches!(command, UnrealCommand::Initialize(_)));
+        dbg.handle_command(command);
+    });
 
     // Send an 'initialize' request
     let response = adapter
@@ -36,11 +63,14 @@ fn hit_breakpoint() {
     }
 
     // Send an 'attach' request
+    let mut attach_map = Map::new();
+    attach_map.insert("port".to_string(), json!(port));
     let response = adapter
         .accept(
             Request {
                 seq: 2,
                 command: Command::Attach(requests::AttachRequestArguments {
+                    other: Some(Value::Object(attach_map)),
                     ..Default::default()
                 }),
             },
@@ -60,7 +90,7 @@ fn hit_breakpoint() {
                 seq: 3,
                 command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
                     source: Source {
-                        path: Some("C:\\foo\\Src\\Package\\Classes\\Classname.uc".to_string()),
+                        path: Some(PACKAGE_CLASSNAME.to_string()),
                         ..Default::default()
                     },
                     breakpoints: Some(vec![SourceBreakpoint {
