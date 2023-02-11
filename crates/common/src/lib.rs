@@ -1,8 +1,21 @@
 //! Communications interface between the debugger interface (Unreal) and the adapter.
 //!
-//! This module defines the data format between the two. The adapter sends
-//! commands to the interface, and the interface sends events to the adapter.
+//! This module defines the data format between the two. There are three types
+//! of message that can be sent between the components:
+//!
+//! Commands are sent from the adapter to the interface, and instruct the deubgger
+//! to do something (e.g. set a breakpoint, or step over the next line).
+//!
+//! Responses are sent from the interface to the adapter, always in predictable
+//! ways: A specific command will result in zero or more responses, and the response
+//! set for a specific command has a fixed structure (e.g. a set breakpoint command
+//! results in exactly one set breakpoint response).
+//!
+//! Events are unpredictable, asynchronous events that are not tied to a particular
+//! command (e.g. a log line being added or a break event).
 use serde::{Serialize, Deserialize};
+
+pub const DEFAULT_PORT: i32 = 18777;
 
 /// Representation of a breakpoint.
 #[derive(Serialize,Deserialize)]
@@ -31,29 +44,11 @@ pub enum UnrealCommand {
     RemoveBreakpoint(Breakpoint),
 }
 
-/// Events that can be sent from the debugger interface to the adapter.
+/// Responses that can be sent from the debugger interface to the adapter, but only
+/// in a well-defined order in response to a command from the adapter.
 #[derive(Serialize,Deserialize)]
-pub enum UnrealEvent {
+pub enum UnrealResponse {
     BreakpointAdded(Breakpoint),
     BreakpointRemoved(Breakpoint),
-}
-
-/// Communications channel between Unreal and the debugger interface.
-pub struct UnrealChannel;
-
-impl UnrealChannel {
-    pub fn new() -> UnrealChannel {
-        UnrealChannel {}
-    }
-
-    /// Synchronous command: add the given breakpoint.
-    pub fn add_breakpoint(&mut self, bp: Breakpoint) -> Breakpoint {
-        bp
-    }
-
-    /// Synchronous command: remove the given breakpoint.
-    pub fn remove_breakpoint(&mut self, bp: Breakpoint) -> Breakpoint {
-        bp
-    }
 }
 

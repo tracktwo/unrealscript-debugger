@@ -6,9 +6,8 @@ use std::{sync::Mutex, thread};
 
 use super::UnrealCallback;
 use super::DEBUGGER;
+use common::DEFAULT_PORT;
 use common::UnrealCommand;
-
-const PORT: i32 = 18777;
 
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 
@@ -207,7 +206,7 @@ pub fn init_logger() -> Result<(), FlexiLoggerError> {
 /// stattes, although we will disconnect any active adapter when we shut down.
 fn main_loop(cb: UnrealCallback) -> () {
     // Start listening on a socket for connections from the adapter.
-    let mut server = TcpListener::bind(format!("127.0.0.1:{PORT}")).expect("Failed to bind port");
+    let mut server = TcpListener::bind(format!("127.0.0.1:{DEFAULT_PORT}")).expect("Failed to bind port");
 
     loop {
         match handle_connection(&mut server, cb) {

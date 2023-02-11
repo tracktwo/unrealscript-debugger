@@ -1,6 +1,8 @@
 
 pub mod client;
 
+mod comm;
+
 use std::{
     collections::BTreeMap,
     path::{Component, Path},
@@ -12,13 +14,16 @@ use dap::{
     responses::ErrorMessage,
     types::{Capabilities, Source, Thread},
 };
+use serde_json::Value;
 use thiserror::Error;
 
-use common::{Breakpoint, UnrealChannel};
+use common::{Breakpoint, DEFAULT_PORT};
+
+use comm::UnrealChannel;
 
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
-    channel: Option<UnrealChannel>,
+    channel: Option<Box<dyn UnrealChannel>>,
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
     one_based_lines: bool,
@@ -44,6 +49,9 @@ pub enum UnrealscriptAdapterError {
 
     #[error("Not connected")]
     NotConnected,
+
+    #[error("Connection failed")]
+    ConnectionError,
 }
 
 impl UnrealscriptAdapterError {
@@ -52,6 +60,7 @@ impl UnrealscriptAdapterError {
             UnrealscriptAdapterError::UnhandledCommandError(_) => 1,
             UnrealscriptAdapterError::InvalidFilename(_) => 2,
             UnrealscriptAdapterError::NotConnected => 3,
+            UnrealscriptAdapterError::ConnectionError => 4,
         }
     }
 
@@ -213,15 +222,27 @@ impl UnrealscriptAdapter {
         }))
     }
 
+    // Extract the port number from an attach arguments value map.
+    fn extract_port(value: &Option<Value>) -> Option<i32> {
+        value.as_ref()?
+        ["port"]
+        .as_i64()?
+        .try_into()
+        .ok()
+    }
+
     /// Attach to a running unreal process
     fn attach(
         &mut self,
-        _args: &AttachRequestArguments,
+        args: &AttachRequestArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         log::info!("Attach request");
 
+        let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
         // Connect to the unrealscript interface and set up the communications channel between
         // it and this adapter.
+        self.channel = Some(comm::connect(port).or(Err(UnrealscriptAdapterError::ConnectionError))?);
+        
         Ok(ResponseBody::Attach)
     }
 }
@@ -304,6 +325,17 @@ mod tests {
 
     use super::*;
 
+    struct MockChannel;
+
+    impl UnrealChannel for MockChannel {
+        fn add_breakpoint(&mut self, bp: Breakpoint) -> Breakpoint {
+            bp
+        }
+        fn remove_breakpoint(&mut self, bp: Breakpoint) -> Breakpoint {
+            bp
+        }
+    }
+
     #[test]
     fn can_split_source() {
         let (package, class) =
@@ -336,8 +368,7 @@ mod tests {
     #[allow(deprecated)]
     fn add_breakpoint_registers_class() {
         let mut adapter = UnrealscriptAdapter::new();
-        // TODO This will need to be mocked for testing.
-        adapter.channel = Some(UnrealChannel::new());
+        adapter.channel = Some(Box::new(MockChannel{}));
         let args = SetBreakpointsArguments {
             source: Source {
                 name: None,
