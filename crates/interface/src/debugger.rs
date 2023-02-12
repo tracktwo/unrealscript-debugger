@@ -21,7 +21,6 @@ pub struct Debugger {
     local_watches: Vec<Watch>,
     global_watches: Vec<Watch>,
     user_watches: Vec<Watch>,
-    breakpoints: Vec<Breakpoint>,
     callstack: Vec<Frame>,
     current_object_name: Option<String>,
     response_channel: Option<Sender>,
@@ -50,7 +49,6 @@ impl Debugger {
             local_watches: Vec::new(),
             global_watches: Vec::new(),
             user_watches: Vec::new(),
-            breakpoints: Vec::new(),
             callstack: Vec::new(),
             current_object_name: None,
             response_channel: None,
@@ -145,30 +143,23 @@ impl Debugger {
 
     pub fn unlock_watchlist(&mut self) -> () {}
 
-    pub fn add_breakpoint(&mut self, class_name: *const c_char, line: i32) -> () {
+    pub fn add_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
         let bp = Breakpoint {
-            qualified_name: self.decode_string(class_name),
+            qualified_name: self.decode_string(name),
             line,
         };
-        self.breakpoints.push(bp.clone());
         if let Err(e) = self.send_response(&UnrealResponse::BreakpointAdded(bp)) {
             log::error!("Sending BreakpointAdded response failed: {e}");
         }
     }
 
     pub fn remove_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
-        let str = self.decode_string(name);
-        if let Some(idx) = self
-            .breakpoints
-            .iter()
-            .position(|val| val.qualified_name == str && val.line == line)
-        {
-            let bp = self.breakpoints.swap_remove(idx);
-            if let Err(e) = self.send_response(&UnrealResponse::BreakpointRemoved(bp)) {
-                log::error!("Sending BreakpointRemoved response failed: {e}");
-            }
-        } else {
-            log::error!("Could not find breakpoint {str}:{line}",);
+        let bp = Breakpoint {
+            qualified_name: self.decode_string(name),
+            line,
+        };
+        if let Err(e) = self.send_response(&UnrealResponse::BreakpointRemoved(bp)) {
+            log::error!("Sending BreakpointRemoved response failed: {e}");
         }
     }
 
@@ -350,34 +341,5 @@ mod tests {
         let val = "10\0".as_ptr() as *const i8;
         let mut dbg = Debugger::new(callback);
         dbg.add_watch(WatchKind::Local, 0, name, val);
-    }
-
-    #[test]
-    fn adds_breakpoint() {
-        let class_name = "SomeClass\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new(callback);
-        dbg.add_breakpoint(class_name, 10);
-        assert_eq!(dbg.breakpoints.len(), 1);
-    }
-
-    #[test]
-    fn can_find_breakpoint() {
-        let class_name = "SomeClass\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new(callback);
-        dbg.add_breakpoint(class_name, 10);
-        dbg.remove_breakpoint(class_name, 10);
-        assert_eq!(dbg.breakpoints.len(), 0);
-    }
-
-    #[test]
-    fn remove_unknown_breakpoint() {
-        let class_name = "SomeClass\0".as_ptr() as *const i8;
-        let another_name = "AnotherClass\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new(callback);
-        dbg.add_breakpoint(class_name, 10);
-        dbg.remove_breakpoint(another_name, 20);
-        assert_eq!(dbg.breakpoints.len(), 1);
-        dbg.remove_breakpoint(class_name, 11);
-        assert_eq!(dbg.breakpoints.len(), 1);
     }
 }

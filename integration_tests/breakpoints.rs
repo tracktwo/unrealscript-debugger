@@ -18,12 +18,12 @@ const PACKAGE_CLASSNAME: &str = if cfg!(windows) {
     "/home/username/src/Package/Classes/Classname.uc"
 };
 
+/// Test callback. This does nothing.
 extern "C" fn callback(_s: *const u8) -> () {}
 
 /// Set a breakpoint and then mock hitting it, ensuring we get a break event at the
 /// expected position.
 #[test]
-#[allow(deprecated)]
 fn hit_breakpoint() {
     let mut adapter = UnrealscriptAdapter::new();
     let mut client = UnrealscriptClient::new(std::io::stdout());
