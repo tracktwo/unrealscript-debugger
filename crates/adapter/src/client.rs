@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use dap::{
+    client,
     events::EventBody,
     prelude::{BasicClient, Client, Context, Event},
     responses::{Response, ResponseBody},
@@ -38,7 +39,7 @@ impl<W: Write> Client for UnrealscriptClient<W> {
 }
 
 impl<W: Write> Context for UnrealscriptClient<W> {
-    fn send_event(&mut self, event: dap::prelude::Event) -> dap::client::Result<()> {
+    fn send_event(&mut self, event: Event) -> client::Result<()> {
         self.client.send_event(event)
     }
 

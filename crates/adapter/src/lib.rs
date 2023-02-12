@@ -335,6 +335,7 @@ pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError
 
 #[cfg(test)]
 mod tests {
+    use common::UnrealEvent;
     use dap::types::{Source, SourceBreakpoint};
 
     use super::*;
@@ -347,6 +348,10 @@ mod tests {
         }
         fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
             Ok(bp)
+        }
+
+        fn next_event(&mut self) -> Option<Result<UnrealEvent, ChannelError>> {
+            None
         }
     }
 

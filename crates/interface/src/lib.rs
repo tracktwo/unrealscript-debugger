@@ -141,7 +141,6 @@ pub extern "C" fn UnlockList(_kind: i32) -> () {
 
 #[no_mangle]
 pub extern "C" fn AddBreakpoint(class_name: *const c_char, line: i32) -> () {
-    trace!("AddBreakpoint");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.add_breakpoint(class_name, line);
@@ -149,7 +148,6 @@ pub extern "C" fn AddBreakpoint(class_name: *const c_char, line: i32) -> () {
 
 #[no_mangle]
 pub extern "C" fn RemoveBreakpoint(class_name: *const c_char, line: i32) -> () {
-    trace!("RemoveBreakpoint");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.remove_breakpoint(class_name, line);
@@ -168,9 +166,10 @@ pub extern "C" fn EditorGotoLine(_line: i32, _highlight: i32) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn AddLineToLog(_text: *const c_char) -> () {
-    trace!("AddLineToLog");
-    // TODO Implement
+pub extern "C" fn AddLineToLog(text: *const c_char) -> () {
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.add_line_to_log(text);
 }
 
 #[no_mangle]

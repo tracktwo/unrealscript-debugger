@@ -1,7 +1,9 @@
 use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
 use ipmpsc::{Sender, SharedRingBuffer};
+use serde::Serialize;
+use serde_json::Serializer;
 use std::ffi::{c_char, CStr};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::ptr;
 use std::{sync::Mutex, thread};
 use textcode::iso8859_1;
@@ -9,7 +11,7 @@ use thiserror::Error;
 
 use super::UnrealCallback;
 use super::DEBUGGER;
-use common::{Breakpoint, UnrealCommand, UnrealResponse};
+use common::{Breakpoint, UnrealCommand, UnrealEvent, UnrealResponse};
 use common::{Frame, Watch, WatchKind, DEFAULT_PORT};
 
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
@@ -22,6 +24,7 @@ pub struct Debugger {
     user_watches: Vec<Watch>,
     callstack: Vec<Frame>,
     current_object_name: Option<String>,
+    event_channel: Option<Serializer<TcpStream>>,
     response_channel: Option<Sender>,
 }
 #[derive(Error, Debug)]
@@ -54,8 +57,15 @@ impl Debugger {
             user_watches: Vec::new(),
             callstack: Vec::new(),
             current_object_name: None,
+            event_channel: None,
             response_channel: None,
         }
+    }
+
+    /// A new connection has been established from the adapter. Record the tcp stream used to send
+    /// events.
+    pub fn new_connection(&mut self, stream: TcpStream) -> () {
+        self.event_channel = Some(serde_json::Serializer::new(stream));
     }
 
     /// Handle a command from the adapter. This may generate responses either directly or
@@ -154,6 +164,7 @@ impl Debugger {
 
     pub fn unlock_watchlist(&mut self) -> () {}
 
+    /// A breakpoint has been added.
     pub fn add_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
         let bp = Breakpoint {
             qualified_name: self.decode_string(name),
@@ -165,6 +176,7 @@ impl Debugger {
         }
     }
 
+    /// A breakpoint has been removed.
     pub fn remove_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
         let bp = Breakpoint {
             qualified_name: self.decode_string(name),
@@ -176,10 +188,12 @@ impl Debugger {
         }
     }
 
+    /// Clear the callstack.
     pub fn clear_callstack(&mut self) -> () {
         self.callstack.clear();
     }
 
+    /// Add a frame to the callstack.
     pub fn add_frame(&mut self, class_name: *const c_char, line: i32) -> () {
         let frame = Frame {
             class_name: self.decode_string(class_name),
@@ -188,8 +202,22 @@ impl Debugger {
         self.callstack.push(frame);
     }
 
+    /// Record the current object name. This is updated each time unreal stops.
     pub fn current_object_name(&mut self, obj_name: *const c_char) -> () {
         self.current_object_name = Some(self.decode_string(obj_name));
+    }
+
+    /// A line has been added to the log. Send directly to the adapter (if connected).
+    pub fn add_line_to_log(&mut self, text: *const c_char) -> () {
+        let str = self.decode_string(text);
+        log::trace!("Add to log: {str}");
+        if let Some(stream) = &mut self.event_channel {
+            if let Err(e) = UnrealEvent::Log(str).serialize(stream) {
+                log::error!("Sending log failed: {e}");
+            }
+        } else {
+            log::trace!("Skipping log entry: not connected.");
+        }
     }
 
     /// Decode an Unreal-encoded string to UTF-8.
@@ -269,6 +297,13 @@ fn main_loop(cb: UnrealCallback) -> () {
 fn handle_connection(server: &mut TcpListener, cb: UnrealCallback) -> Result<(), DebuggerError> {
     let (stream, addr) = server.accept().or(Err(DebuggerError::InitializeFailure))?;
     log::info!("Received connection from {addr}");
+
+    // Tell the debugger state we have a new connection for it to send events through.
+    {
+        let mut hnd = DEBUGGER.lock().unwrap();
+        let dbg = hnd.as_mut().unwrap();
+        dbg.new_connection(stream.try_clone().unwrap());
+    }
 
     let mut deserializer =
         serde_json::Deserializer::from_reader(stream).into_iter::<UnrealCommand>();

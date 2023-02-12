@@ -15,3 +15,8 @@ ipmpsc = "0.5"
 [[test]]
 name="breakpoints"
 path="breakpoints.rs"
+
+
+[[test]]
+name="log"
+path="log.rs"

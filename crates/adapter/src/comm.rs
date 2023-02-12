@@ -1,9 +1,9 @@
 use std::{net::TcpStream, time::Duration};
 
-use common::{Breakpoint, UnrealCommand, UnrealResponse};
+use common::{Breakpoint, UnrealCommand, UnrealEvent, UnrealResponse};
 use ipmpsc::{Receiver, SharedRingBuffer};
-use serde::Serialize;
-use serde_json::Serializer;
+use serde::{Deserialize, Serialize};
+use serde_json::{de::IoRead, Deserializer, Serializer};
 use thiserror::Error;
 
 /// An error sending or receiving data across the channel.
@@ -42,6 +42,8 @@ pub trait UnrealChannel: Send + 'static {
 
     // Remove a breakpoint, receiving the removed breakpoint from unreal.
     fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError>;
+
+    fn next_event(&mut self) -> Option<Result<UnrealEvent, ChannelError>>;
 }
 
 /// The DefaultChannel uses two communications modes for talking to the debugger interface.
@@ -61,7 +63,8 @@ pub trait UnrealChannel: Send + 'static {
 ///  - Synchronous communication of command to one or more responses can be done on the adapter's
 ///  main message processing thread.
 pub struct DefaultChannel {
-    receiver: Receiver,
+    response_receiver: Receiver,
+    event_receiver: Deserializer<IoRead<TcpStream>>,
     sender: Serializer<TcpStream>,
 }
 
@@ -78,7 +81,7 @@ impl UnrealChannel for DefaultChannel {
 
         // This should result in exactly one breakpoint response from the interface.
         let response = self
-            .receiver
+            .response_receiver
             .recv_timeout(DEFAULT_TIMEOUT)
             .or(Err(ChannelError::ConnectionError))?;
         match response {
@@ -93,13 +96,18 @@ impl UnrealChannel for DefaultChannel {
 
         // This should result in exactly one breakpoint response from the interface.
         let response = self
-            .receiver
+            .response_receiver
             .recv_timeout(DEFAULT_TIMEOUT)
             .or(Err(ChannelError::ConnectionError))?;
         match response {
             Some(UnrealResponse::BreakpointRemoved(bp)) => Ok(bp),
             _ => Err(ChannelError::ProtocolError),
         }
+    }
+
+    fn next_event(&mut self) -> Option<Result<UnrealEvent, ChannelError>> {
+        let res = UnrealEvent::deserialize(&mut self.event_receiver);
+        Some(res.map_err(|e| ChannelError::SerializationError(e)))
     }
 }
 
@@ -113,8 +121,11 @@ pub fn connect(port: i32) -> Result<Box<dyn UnrealChannel>, ChannelError> {
     // Send the path of the shared memory buffer to the interface.
     let mut serializer = Serializer::new(tcp.try_clone().or(Err(ChannelError::ConnectionError))?);
     UnrealCommand::Initialize(path).serialize(&mut serializer)?;
+
+    let deserializer = serde_json::Deserializer::from_reader(tcp);
     Ok(Box::new(DefaultChannel {
-        receiver: Receiver::new(shmem),
+        response_receiver: Receiver::new(shmem),
+        event_receiver: deserializer,
         sender: serializer,
     }))
 }
