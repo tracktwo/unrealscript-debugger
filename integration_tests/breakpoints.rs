@@ -9,7 +9,7 @@ use dap::{
 };
 use interface::debugger::Debugger;
 use serde_json::{json, Map, Value};
-use std::{ffi::c_char, net::TcpListener};
+use std::{ffi::c_char, net::TcpListener, time::Duration};
 use std::{
     io::Stdout,
     thread::{self, JoinHandle},
@@ -109,6 +109,21 @@ where
     (adapter, client, interface_thread)
 }
 
+/// Helper to wait for the spawned interface thread to end without blocking tests forever if
+/// the thread does not complete. Will wait for up to 5 seconds for the thread to become joinable
+/// and then panic if not.
+fn wait_for_thread(handle: JoinHandle<()>) {
+    for _ in 0..5 {
+        if handle.is_finished() {
+            handle.join().unwrap();
+            return;
+        } else {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    panic!("Thread did not complete after 5 seconds");
+}
+
 /// Set a breakpoint and then mock hitting it, ensuring we get a break event at the expected position.
 #[test]
 fn hit_breakpoint() {
@@ -148,7 +163,7 @@ fn hit_breakpoint() {
         _o => assert!(false, "Expected a setbreakpoints response: {_o:#?}"),
     }
 
-    handle.join().unwrap();
+    wait_for_thread(handle);
 }
 
 /// Test removing a breakpoint
@@ -221,5 +236,5 @@ fn remove_breakpoint() {
         _o => assert!(false, "Expected a setbreakpoints response: {_o:#?}"),
     }
 
-    handle.join().unwrap();
+    wait_for_thread(handle);
 }
