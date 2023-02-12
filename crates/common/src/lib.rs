@@ -34,6 +34,38 @@ impl Breakpoint {
     }
 }
 
+/// A variable watch.
+pub struct Watch {
+    pub parent: i32,
+    pub name: String,
+    pub value: String,
+}
+
+/// A callstack frame.
+pub struct Frame {
+    pub class_name: String,
+    pub line: i32,
+}
+
+/// The kind of watch, e.g. scope or user-defined watches.
+pub enum WatchKind {
+    Local,
+    Global,
+    User,
+}
+
+impl WatchKind {
+    /// Map an integer value to a WatchKind
+    pub fn from_int(kind: i32) -> Option<WatchKind> {
+        match kind {
+            0 => Some(WatchKind::Local),
+            1 => Some(WatchKind::Global),
+            2 => Some(WatchKind::User),
+            _ => None,
+        }
+    }
+}
+
 /// Commands that can be sent from the adapter to the debugger interface.
 #[derive(Serialize, Deserialize)]
 pub enum UnrealCommand {

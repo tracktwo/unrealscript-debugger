@@ -1,14 +1,13 @@
 //! Integration tests for communications between the adapter and interface.
 
 use adapter::{client::UnrealscriptClient, UnrealscriptAdapter};
-use common::{Breakpoint, UnrealCommand, UnrealEvent, UnrealResponse};
+use common::UnrealCommand;
 use dap::{
     prelude::*,
     requests::{Command, Request},
     types::{Source, SourceBreakpoint},
 };
 use interface::debugger::Debugger;
-use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::thread;
 use std::{ffi::c_char, net::TcpListener};

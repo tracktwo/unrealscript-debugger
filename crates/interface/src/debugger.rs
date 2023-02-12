@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use super::UnrealCallback;
 use super::DEBUGGER;
-use common::DEFAULT_PORT;
 use common::{Breakpoint, UnrealCommand, UnrealResponse};
+use common::{Frame, Watch, WatchKind, DEFAULT_PORT};
 
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 
@@ -25,38 +25,6 @@ pub struct Debugger {
     callstack: Vec<Frame>,
     current_object_name: Option<String>,
     response_channel: Option<Sender>,
-}
-
-/// A variable watch.
-pub struct Watch {
-    parent: i32,
-    name: String,
-    value: String,
-}
-
-/// A callstack frame.
-pub struct Frame {
-    class_name: String,
-    line: i32,
-}
-
-/// The kind of watch, e.g. scope or user-defined watches.
-pub enum WatchKind {
-    Local,
-    Global,
-    User,
-}
-
-impl WatchKind {
-    /// Map an integer value to a WatchKind
-    pub fn from_int(kind: i32) -> Option<WatchKind> {
-        match kind {
-            0 => Some(WatchKind::Local),
-            1 => Some(WatchKind::Global),
-            2 => Some(WatchKind::User),
-            _ => None,
-        }
-    }
 }
 #[derive(Error, Debug)]
 pub enum DebuggerError {
