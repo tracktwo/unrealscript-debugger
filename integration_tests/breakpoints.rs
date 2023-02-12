@@ -21,9 +21,6 @@ const PACKAGE_CLASSNAME: &str = if cfg!(windows) {
     "/home/username/src/Package/Classes/Classname.uc\0"
 };
 
-/// Test callback. This does nothing.
-extern "C" fn callback(_s: *const u8) -> () {}
-
 /// Integration test setup:
 /// - construct an adapter and client;
 /// - open a tcp listener for a mock interface on a random port.
@@ -52,7 +49,7 @@ where
     let port = server.local_addr().unwrap().port();
 
     let interface_thread = thread::spawn(move || {
-        let mut dbg = Debugger::new(callback);
+        let mut dbg = Debugger::new();
         let (stream, _addr) = server.accept().unwrap();
         let mut deserializer = serde_json::Deserializer::from_reader(stream.try_clone().unwrap())
             .into_iter::<UnrealCommand>();

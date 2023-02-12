@@ -16,7 +16,6 @@ static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 
 /// A struct representing the debugger state.
 pub struct Debugger {
-    callback: UnrealCallback,
     class_hierarchy: Vec<String>,
     local_watches: Vec<Watch>,
     global_watches: Vec<Watch>,
@@ -42,9 +41,8 @@ impl From<serde_json::Error> for DebuggerError {
 }
 
 impl Debugger {
-    pub fn new(callback: UnrealCallback) -> Debugger {
+    pub fn new() -> Debugger {
         Debugger {
-            callback,
             class_hierarchy: Vec::new(),
             local_watches: Vec::new(),
             global_watches: Vec::new(),
@@ -56,36 +54,29 @@ impl Debugger {
     }
 
     /// Handle a command from the adapter. This may generate responses.
-    pub fn handle_command(&mut self, command: UnrealCommand) -> Result<(), DebuggerError> {
+    pub fn handle_command(
+        &mut self,
+        command: UnrealCommand,
+    ) -> Result<Option<Vec<u8>>, DebuggerError> {
         match command {
             UnrealCommand::Initialize(path) => {
                 log::trace!("handle_command: initialize");
                 let buf =
                     SharedRingBuffer::open(&path).or(Err(DebuggerError::InitializeFailure))?;
                 self.response_channel = Some(Sender::new(buf));
-                Ok(())
+                Ok(None)
             }
             UnrealCommand::AddBreakpoint(bp) => {
                 let str = format!("addbreakpoint {} {}", bp.qualified_name, bp.line);
                 log::trace!("handle_command: {str}");
-                self.invoke_callback(&str);
-                Ok(())
+                Ok(Some(self.encode_string(&str)))
             }
             UnrealCommand::RemoveBreakpoint(bp) => {
                 let str = format!("removebreakpoint {} {}", bp.qualified_name, bp.line);
                 log::trace!("handle_command: {str}");
-                self.invoke_callback(&str);
-                Ok(())
+                Ok(Some(self.encode_string(&str)))
             }
         }
-    }
-
-    /// Invoke the unreal callback with the given string argument. This will be
-    /// reencoded to Unreal's format and null terminated before sending.
-    fn invoke_callback(&mut self, command: &str) -> () {
-        let mut encoded = self.encode_string(command);
-        encoded.push(0);
-        (self.callback)(encoded.as_ptr());
     }
 
     /// Send a response message. Since responses are always in reaction to a command, this requires
@@ -212,7 +203,7 @@ pub fn initialize(cb: UnrealCallback) -> () {
         let _ = init_logger();
 
         // Construct the debugger state.
-        dbg.replace(Debugger::new(cb));
+        dbg.replace(Debugger::new());
 
         // Start the main loop that will listen for connections so we can
         // communiate the debugger state to the adapter.
@@ -260,7 +251,7 @@ fn main_loop(cb: UnrealCallback) -> () {
 ///
 /// We accept only a single connection at a time, if multiple adapters attempt to connect
 /// we'll process them in sequence.
-fn handle_connection(server: &mut TcpListener, _cb: UnrealCallback) -> Result<(), DebuggerError> {
+fn handle_connection(server: &mut TcpListener, cb: UnrealCallback) -> Result<(), DebuggerError> {
     let (stream, addr) = server.accept().or(Err(DebuggerError::InitializeFailure))?;
     log::info!("Received connection from {addr}");
 
@@ -269,7 +260,17 @@ fn handle_connection(server: &mut TcpListener, _cb: UnrealCallback) -> Result<()
     while let Some(command) = deserializer.next() {
         let mut hnd = DEBUGGER.lock().unwrap();
         let dbg = hnd.as_mut().unwrap();
-        dbg.handle_command(command?)?;
+        let vec = dbg.handle_command(command?)?;
+
+        // We must drop the mutex on the debugger instance before invoking the callback.
+        // For certain callback commands Unreal will synchronously call back into us
+        // on the same thread and we will need to re-acquire the mutex at that point to
+        // process the response.
+        drop(hnd);
+        if let Some(mut vec) = vec {
+            vec.push(0);
+            (cb)(vec.as_ptr());
+        }
     }
     Ok(())
 }
@@ -290,12 +291,10 @@ fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
 mod tests {
     use super::*;
 
-    extern "C" fn callback(_s: *const u8) -> () {}
-
     #[test]
     fn adding_to_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new(callback);
+        let mut dbg = Debugger::new();
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy[0], "Package.Class");
     }
@@ -303,7 +302,7 @@ mod tests {
     #[test]
     fn clearing_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new(callback);
+        let mut dbg = Debugger::new();
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy.len(), 1);
         dbg.clear_class_hierarchy();
@@ -314,7 +313,7 @@ mod tests {
     fn add_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new(callback);
+        let mut dbg = Debugger::new();
         assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 0);
         assert_eq!(dbg.local_watches.len(), 1);
         assert_eq!(dbg.global_watches.len(), 0);
@@ -333,7 +332,7 @@ mod tests {
     fn clear_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new(callback);
+        let mut dbg = Debugger::new();
         dbg.add_watch(WatchKind::Local, -1, name, val);
         dbg.add_watch(WatchKind::Global, -1, name, val);
         dbg.add_watch(WatchKind::User, -1, name, val);
@@ -348,7 +347,7 @@ mod tests {
     fn add_watch_invalid_parent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new(callback);
+        let mut dbg = Debugger::new();
         dbg.add_watch(WatchKind::Local, 0, name, val);
     }
 }
