@@ -41,6 +41,11 @@ impl From<serde_json::Error> for DebuggerError {
 }
 
 impl Debugger {
+    /// Construct a new debugger instance with an empty state. Note that the callback pointer is
+    /// _not_ passed as an argument to the debugger instance. This is because the debugger instance
+    /// cannot safely call through the callback as callback calls can immediately re-enter the
+    /// interface on the same thread, which would require us to re-acquire the debugger mutex while
+    /// we already hold it to perform the callback.
     pub fn new() -> Debugger {
         Debugger {
             class_hierarchy: Vec::new(),
@@ -53,7 +58,15 @@ impl Debugger {
         }
     }
 
-    /// Handle a command from the adapter. This may generate responses.
+    /// Handle a command from the adapter. This may generate responses either directly or
+    /// indirectly. If the command requires a callback into unreal the encoded string will be
+    /// returned from this function for the caller to dispatch to Unreal.
+    ///
+    /// NOTE: It's critical that the caller release the lock on the debugger object before
+    /// calling into Unreal, as unreal commands that generate a synchronous response (e.g.
+    /// addbreakpoint) will immediately call back into the debugger interface on the same thread.
+    /// This means we will need to acquire the mutex lock to process the event, which can't happen
+    /// if we're already holding it.
     pub fn handle_command(
         &mut self,
         command: UnrealCommand,
@@ -185,9 +198,11 @@ impl Debugger {
         return iso8859_1::decode_to_string(str.to_bytes());
     }
 
-    /// Encode a UTF-8 string to Unreal.
+    /// Encode a UTF-8 string to Unreal, ensuring null-termination.
     fn encode_string(&mut self, s: &str) -> Vec<u8> {
-        iso8859_1::encode_to_vec(s)
+        let mut vec = iso8859_1::encode_to_vec(s);
+        vec.push(0);
+        vec
     }
 }
 
@@ -258,17 +273,18 @@ fn handle_connection(server: &mut TcpListener, cb: UnrealCallback) -> Result<(),
     let mut deserializer =
         serde_json::Deserializer::from_reader(stream).into_iter::<UnrealCommand>();
     while let Some(command) = deserializer.next() {
-        let mut hnd = DEBUGGER.lock().unwrap();
-        let dbg = hnd.as_mut().unwrap();
-        let vec = dbg.handle_command(command?)?;
+        let vec;
+        {
+            let mut hnd = DEBUGGER.lock().unwrap();
+            let dbg = hnd.as_mut().unwrap();
+            vec = dbg.handle_command(command?)?;
 
-        // We must drop the mutex on the debugger instance before invoking the callback.
-        // For certain callback commands Unreal will synchronously call back into us
-        // on the same thread and we will need to re-acquire the mutex at that point to
-        // process the response.
-        drop(hnd);
-        if let Some(mut vec) = vec {
-            vec.push(0);
+            // We must drop the mutex on the debugger instance before invoking the callback.
+            // For certain callback commands Unreal will synchronously call back into us
+            // on the same thread and we will need to re-acquire the mutex at that point to
+            // process the response.
+        }
+        if let Some(vec) = vec {
             (cb)(vec.as_ptr());
         }
     }

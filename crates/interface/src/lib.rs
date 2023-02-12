@@ -163,7 +163,7 @@ pub extern "C" fn EditorLoadClass(_class_name: *const c_char) -> () {
 
 #[no_mangle]
 pub extern "C" fn EditorGotoLine(_line: i32, _highlight: i32) -> () {
-    trace!("EditorLoadClass");
+    trace!("EditorGotoLine");
     // TODO Implement
 }
 
