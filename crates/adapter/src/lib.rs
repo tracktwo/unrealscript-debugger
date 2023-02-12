@@ -167,6 +167,7 @@ impl UnrealscriptAdapter {
             .class_map
             .entry(qualified_class_name.clone())
             .or_insert(class_info);
+
         // Remove all the existing breakpoints from this class.
         for bp in class_info.breakpoints.iter() {
             let removed = self
@@ -174,6 +175,9 @@ impl UnrealscriptAdapter {
                 .as_mut()
                 .unwrap()
                 .remove_breakpoint(Breakpoint::new(&qualified_class_name, *bp))?;
+
+            // The internal state of the adapter's breakpoint list should always be consistent with
+            // what unreal thinks the breakpoints are set on.
             assert!(removed.line == *bp);
         }
 
@@ -331,7 +335,7 @@ pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError
 
 #[cfg(test)]
 mod tests {
-    use dap::types::Source;
+    use dap::types::{Source, SourceBreakpoint};
 
     use super::*;
 
@@ -385,27 +389,105 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn add_breakpoint_registers_class() {
         let mut adapter = UnrealscriptAdapter::new();
         adapter.channel = Some(Box::new(MockChannel {}));
         let args = SetBreakpointsArguments {
             source: Source {
-                name: None,
                 path: Some(GOOD_PATH.to_string()),
-                source_reference: None,
-                presentation_hint: None,
-                origin: None,
-                sources: None,
-                adapter_data: None,
-                checksums: None,
+                ..Default::default()
             },
-            lines: None,
-            breakpoints: None,
-            source_modified: None,
+            breakpoints: Some(vec![SourceBreakpoint {
+                line: 10,
+                ..Default::default()
+            }]),
+
+            ..Default::default()
         };
         let _response = adapter.set_breakpoints(&args).unwrap();
         // Class cache should be keyed on UPCASED qualified names.
         assert!(adapter.class_map.contains_key("MYPACKAGE.SOMECLASS"));
+
+        // The entry in this map should have 1 breakpoint
+        assert_eq!(
+            adapter.class_map["MYPACKAGE.SOMECLASS"].breakpoints,
+            vec![10]
+        );
+    }
+
+    #[test]
+    fn add_multiple_breakpoints() {
+        let mut adapter = UnrealscriptAdapter::new();
+        adapter.channel = Some(Box::new(MockChannel {}));
+        let args = SetBreakpointsArguments {
+            source: Source {
+                path: Some(GOOD_PATH.to_string()),
+                ..Default::default()
+            },
+            breakpoints: Some(vec![
+                SourceBreakpoint {
+                    line: 10,
+                    ..Default::default()
+                },
+                SourceBreakpoint {
+                    line: 105,
+                    ..Default::default()
+                },
+            ]),
+
+            ..Default::default()
+        };
+        let _response = adapter.set_breakpoints(&args).unwrap();
+        // The entry in this map should have 2 breakpoints
+        assert_eq!(
+            adapter.class_map["MYPACKAGE.SOMECLASS"].breakpoints,
+            vec![10, 105]
+        );
+    }
+
+    #[test]
+    fn reset_breakpoints() {
+        let mut adapter = UnrealscriptAdapter::new();
+        adapter.channel = Some(Box::new(MockChannel {}));
+        let mut args = SetBreakpointsArguments {
+            source: Source {
+                path: Some(GOOD_PATH.to_string()),
+                ..Default::default()
+            },
+            breakpoints: Some(vec![
+                SourceBreakpoint {
+                    line: 10,
+                    ..Default::default()
+                },
+                SourceBreakpoint {
+                    line: 105,
+                    ..Default::default()
+                },
+            ]),
+
+            ..Default::default()
+        };
+        adapter.set_breakpoints(&args).unwrap();
+
+        // Set breakpoints in this class again.
+        args = SetBreakpointsArguments {
+            source: Source {
+                path: Some(GOOD_PATH.to_string()),
+                ..Default::default()
+            },
+            breakpoints: Some(vec![SourceBreakpoint {
+                line: 26,
+                ..Default::default()
+            }]),
+
+            ..Default::default()
+        };
+        // this should delete the two existing breakpoints and replace them
+        // with the new one.
+        adapter.set_breakpoints(&args).unwrap();
+        assert_eq!(
+            adapter.class_map["MYPACKAGE.SOMECLASS"].breakpoints,
+            vec![26]
+        );
     }
 }

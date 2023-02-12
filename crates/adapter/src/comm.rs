@@ -88,7 +88,18 @@ impl UnrealChannel for DefaultChannel {
     }
 
     fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
-        Ok(bp)
+        // Send the breakpoint removal to the interface
+        UnrealCommand::RemoveBreakpoint(bp).serialize(&mut self.sender)?;
+
+        // This should result in exactly one breakpoint response from the interface.
+        let response = self
+            .receiver
+            .recv_timeout(DEFAULT_TIMEOUT)
+            .or(Err(ChannelError::ConnectionError))?;
+        match response {
+            Some(UnrealResponse::BreakpointRemoved(bp)) => Ok(bp),
+            _ => Err(ChannelError::ProtocolError),
+        }
     }
 }
 
