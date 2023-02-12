@@ -1,20 +1,17 @@
 //! Integration tests for communications between the adapter and interface.
 
 use adapter::{client::UnrealscriptClient, UnrealscriptAdapter};
-use common::{UnrealCommand, UnrealEvent};
-use ipmpsc::SharedRingBuffer;
-use serde_json::{Value, Map, json};
-use std::net::TcpListener;
-use std::thread;
+use common::{Breakpoint, UnrealCommand, UnrealEvent, UnrealResponse};
 use dap::{
     prelude::*,
     requests::{Command, Request},
     types::{Source, SourceBreakpoint},
 };
 use interface::debugger::Debugger;
-
-/// Set a breakpoint and then mock hitting it, ensuring we get a break event at the
-/// expected position.
+use serde::Serialize;
+use serde_json::{json, Map, Value};
+use std::thread;
+use std::{ffi::c_char, net::TcpListener};
 
 const PACKAGE_CLASSNAME: &str = if cfg!(windows) {
     "C:\\foo\\Src\\Package\\Classes\\Classname.uc"
@@ -22,6 +19,10 @@ const PACKAGE_CLASSNAME: &str = if cfg!(windows) {
     "/home/username/src/Package/Classes/Classname.uc"
 };
 
+extern "C" fn callback(_s: *const u8) -> () {}
+
+/// Set a breakpoint and then mock hitting it, ensuring we get a break event at the
+/// expected position.
 #[test]
 #[allow(deprecated)]
 fn hit_breakpoint() {
@@ -30,16 +31,24 @@ fn hit_breakpoint() {
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = server.local_addr().unwrap().port();
 
-    let _interface_thread = thread::spawn(move || {
-        let mut dbg = Debugger::new();
+    let interface_thread = thread::spawn(move || {
+        let mut dbg = Debugger::new(callback);
         let (stream, _addr) = server.accept().unwrap();
-        let mut deserializer = serde_json::Deserializer::from_reader(stream.try_clone().unwrap()).into_iter::<UnrealCommand>();
-        let serializer = serde_json::Serializer::new(stream);
+        let mut deserializer = serde_json::Deserializer::from_reader(stream.try_clone().unwrap())
+            .into_iter::<UnrealCommand>();
 
         // First command should be an initialize
         let command = deserializer.next().unwrap().unwrap();
         assert!(matches!(command, UnrealCommand::Initialize(_)));
-        dbg.handle_command(command);
+        dbg.handle_command(command).unwrap();
+
+        // Next command should be add breakpoint
+        let command = deserializer.next().unwrap().unwrap();
+        assert!(matches!(command, UnrealCommand::AddBreakpoint(_)));
+        dbg.handle_command(command).unwrap();
+
+        // Generate an add breakpoint event from unreal
+        dbg.add_breakpoint(PACKAGE_CLASSNAME.as_ptr() as *mut c_char, 10);
     });
 
     // Send an 'initialize' request
@@ -108,4 +117,6 @@ fn hit_breakpoint() {
         ResponseBody::SetBreakpoints(_) => (),
         _o => assert!(false, "Expected a setbreakpoints response: {_o:#?}"),
     }
+
+    interface_thread.join().unwrap();
 }

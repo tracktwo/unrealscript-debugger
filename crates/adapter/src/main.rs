@@ -9,9 +9,7 @@ use adapter::client::UnrealscriptClient;
 fn main() {
     let _logger = Logger::try_with_env_or_str("trace")
         .unwrap()
-        .log_to_file(FileSpec::default().directory(
-            "C:\\users\\jonat\\projects\\debugger\\logs",
-        ))
+        .log_to_file(FileSpec::default().directory("logs"))
         .start()
         .unwrap();
 

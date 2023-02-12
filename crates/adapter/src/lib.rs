@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use common::{Breakpoint, DEFAULT_PORT};
 
-use comm::UnrealChannel;
+use comm::{ChannelError, UnrealChannel};
 
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
@@ -49,20 +49,24 @@ pub enum UnrealscriptAdapterError {
     #[error("Not connected")]
     NotConnected,
 
-    #[error("Connection failed")]
-    ConnectionError,
+    #[error("Communication error: {0}")]
+    CommunicationError(ChannelError),
 }
 
 impl UnrealscriptAdapterError {
+    /// Return a fixed id number for an error. This is used in DAP error
+    /// responses to uniquely identify messages.
     fn id(&self) -> i64 {
         match self {
             UnrealscriptAdapterError::UnhandledCommandError(_) => 1,
             UnrealscriptAdapterError::InvalidFilename(_) => 2,
             UnrealscriptAdapterError::NotConnected => 3,
-            UnrealscriptAdapterError::ConnectionError => 4,
+            UnrealscriptAdapterError::CommunicationError(_) => 4,
         }
     }
 
+    /// Convet an UnrealScriptAdapterError to a DAP error message suitable
+    /// for use as a body in an error response.
     pub fn to_error_message(&self) -> ErrorMessage {
         ErrorMessage {
             id: self.id(),
@@ -72,10 +76,19 @@ impl UnrealscriptAdapterError {
     }
 }
 
+impl From<ChannelError> for UnrealscriptAdapterError {
+    /// Convert a ChannelError to an UnrealscriptAdapterError
+    fn from(value: ChannelError) -> Self {
+        UnrealscriptAdapterError::CommunicationError(value)
+    }
+}
+
 type Error = UnrealscriptAdapterError;
 
 impl Adapter for UnrealscriptAdapter {
     type Error = UnrealscriptAdapterError;
+
+    /// Process a DAP request, returning a response.
     fn accept(&mut self, request: Request, ctx: &mut dyn Context) -> Result<Response, Self::Error> {
         log::info!("Got request {request:#?}");
         let response = match &request.command {
@@ -160,7 +173,7 @@ impl UnrealscriptAdapter {
                 .channel
                 .as_mut()
                 .unwrap()
-                .remove_breakpoint(Breakpoint::new(&qualified_class_name, *bp));
+                .remove_breakpoint(Breakpoint::new(&qualified_class_name, *bp))?;
             assert!(removed.line == *bp);
         }
 
@@ -180,7 +193,7 @@ impl UnrealscriptAdapter {
                         .channel
                         .as_mut()
                         .unwrap()
-                        .add_breakpoint(Breakpoint::new(&qualified_class_name, line));
+                        .add_breakpoint(Breakpoint::new(&qualified_class_name, line))?;
 
                     // Record this breakpoint in our data structure
                     class_info.breakpoints.push(new_bp.line);
@@ -234,10 +247,11 @@ impl UnrealscriptAdapter {
         log::info!("Attach request");
 
         let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
+
+        log::info!("Connecting to port {port}");
         // Connect to the unrealscript interface and set up the communications channel between
         // it and this adapter.
-        self.channel =
-            Some(comm::connect(port).or(Err(UnrealscriptAdapterError::ConnectionError))?);
+        self.channel = Some(comm::connect(port)?);
 
         Ok(ResponseBody::Attach)
     }
@@ -324,11 +338,11 @@ mod tests {
     struct MockChannel;
 
     impl UnrealChannel for MockChannel {
-        fn add_breakpoint(&mut self, bp: Breakpoint) -> Breakpoint {
-            bp
+        fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
+            Ok(bp)
         }
-        fn remove_breakpoint(&mut self, bp: Breakpoint) -> Breakpoint {
-            bp
+        fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
+            Ok(bp)
         }
     }
 

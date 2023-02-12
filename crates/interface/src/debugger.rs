@@ -1,48 +1,46 @@
 use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
-use ipmpsc::SharedRingBuffer;
-use std::ffi::{c_char, CStr, CString};
+use ipmpsc::{Sender, SharedRingBuffer};
+use std::ffi::{c_char, CStr};
 use std::net::TcpListener;
-use std::{io, ptr};
+use std::ptr;
 use std::{sync::Mutex, thread};
+use textcode::iso8859_1;
+use thiserror::Error;
 
 use super::UnrealCallback;
 use super::DEBUGGER;
-use common::UnrealCommand;
 use common::DEFAULT_PORT;
+use common::{Breakpoint, UnrealCommand, UnrealResponse};
 
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 
 /// A struct representing the debugger state.
 pub struct Debugger {
-    class_hierarchy: Vec<Box<CString>>,
+    callback: UnrealCallback,
+    class_hierarchy: Vec<String>,
     local_watches: Vec<Watch>,
     global_watches: Vec<Watch>,
     user_watches: Vec<Watch>,
     breakpoints: Vec<Breakpoint>,
     callstack: Vec<Frame>,
-    current_object_name: Option<Box<CString>>,
+    current_object_name: Option<String>,
+    response_channel: Option<Sender>,
 }
 
 /// A variable watch.
 pub struct Watch {
     parent: i32,
-    name: Box<CString>,
-    value: Box<CString>,
-}
-
-/// A breakpoint, verified by Unreal.
-pub struct Breakpoint {
-    class_name: Box<CString>,
-    line: i32,
+    name: String,
+    value: String,
 }
 
 /// A callstack frame.
 pub struct Frame {
-    class_name: Box<CString>,
+    class_name: String,
     line: i32,
 }
 
-// The kind of watch, e.g. scope or user-defined watches.
+/// The kind of watch, e.g. scope or user-defined watches.
 pub enum WatchKind {
     Local,
     Global,
@@ -50,6 +48,7 @@ pub enum WatchKind {
 }
 
 impl WatchKind {
+    /// Map an integer value to a WatchKind
     pub fn from_int(kind: i32) -> Option<WatchKind> {
         match kind {
             0 => Some(WatchKind::Local),
@@ -59,10 +58,26 @@ impl WatchKind {
         }
     }
 }
+#[derive(Error, Debug)]
+pub enum DebuggerError {
+    #[error("Failed to initialize")]
+    InitializeFailure,
+    #[error("Serialization error: {0}")]
+    SerializationError(serde_json::Error),
+    #[error("Not connected")]
+    NotConnected,
+}
+
+impl From<serde_json::Error> for DebuggerError {
+    fn from(value: serde_json::Error) -> Self {
+        DebuggerError::SerializationError(value)
+    }
+}
 
 impl Debugger {
-    pub fn new() -> Debugger {
+    pub fn new(callback: UnrealCallback) -> Debugger {
         Debugger {
+            callback,
             class_hierarchy: Vec::new(),
             local_watches: Vec::new(),
             global_watches: Vec::new(),
@@ -70,20 +85,50 @@ impl Debugger {
             breakpoints: Vec::new(),
             callstack: Vec::new(),
             current_object_name: None,
+            response_channel: None,
         }
     }
 
-    pub fn handle_command(&mut self, command: UnrealCommand) -> () {
+    /// Handle a command from the adapter. This may generate responses.
+    pub fn handle_command(&mut self, command: UnrealCommand) -> Result<(), DebuggerError> {
         match command {
-            UnrealCommand::Initialize(_path) => (),
-            UnrealCommand::SetBreakpoint(_) => (),
-            UnrealCommand::RemoveBreakpoint(_) => (),
+            UnrealCommand::Initialize(path) => {
+                let buf =
+                    SharedRingBuffer::open(&path).or(Err(DebuggerError::InitializeFailure))?;
+                self.response_channel = Some(Sender::new(buf));
+                Ok(())
+            }
+            UnrealCommand::AddBreakpoint(bp) => {
+                let str = format!("addbreakpoint {}", bp.qualified_name);
+                self.invoke_callback(&str);
+                Ok(())
+            }
+            UnrealCommand::RemoveBreakpoint(_) => Ok(()),
         }
+    }
+
+    /// Invoke the unreal callback with the given string argument. This will be
+    /// reencoded to Unreal's format and null terminated before sending.
+    fn invoke_callback(&mut self, command: &str) -> () {
+        let mut encoded = self.encode_string(command);
+        encoded.push(0);
+        (self.callback)(encoded.as_ptr());
+    }
+
+    /// Send a response message. Since responses are always in reaction to a command, this requires
+    /// a connected response channel and it is a logic error for this to not exist.
+    pub fn send_response(&mut self, response: &UnrealResponse) -> Result<(), DebuggerError> {
+        self.response_channel
+            .as_mut()
+            .ok_or(DebuggerError::NotConnected)?
+            .send(response)
+            .or(Err(DebuggerError::NotConnected))?;
+        Ok(())
     }
 
     /// Add a class to the debugger's class hierarchy.
     pub fn add_class_to_hierarchy(&mut self, arg: *const c_char) -> () {
-        let str = make_cstring(arg);
+        let str = self.decode_string(arg);
         self.class_hierarchy.push(str);
     }
 
@@ -109,8 +154,8 @@ impl Debugger {
     ) -> i32 {
         let watch = Watch {
             parent,
-            name: make_cstring(name),
-            value: make_cstring(value),
+            name: self.decode_string(name),
+            value: self.decode_string(value),
         };
         let vec: &mut Vec<Watch> = match kind {
             WatchKind::Local => self.local_watches.as_mut(),
@@ -134,25 +179,28 @@ impl Debugger {
 
     pub fn add_breakpoint(&mut self, class_name: *const c_char, line: i32) -> () {
         let bp = Breakpoint {
-            class_name: make_cstring(class_name),
+            qualified_name: self.decode_string(class_name),
             line,
         };
-        self.breakpoints.push(bp);
+        self.breakpoints.push(bp.clone());
+        if let Err(e) = self.send_response(&UnrealResponse::BreakpointAdded(bp)) {
+            log::error!("Sending BreakpointAdded response failed: {e}");
+        }
     }
 
     pub fn remove_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
-        let str = make_cstr(name);
+        let str = self.decode_string(name);
         if let Some(idx) = self
             .breakpoints
             .iter()
-            .position(|val| val.class_name.as_c_str() == str && val.line == line)
+            .position(|val| val.qualified_name == str && val.line == line)
         {
-            self.breakpoints.swap_remove(idx);
+            let bp = self.breakpoints.swap_remove(idx);
+            if let Err(e) = self.send_response(&UnrealResponse::BreakpointRemoved(bp)) {
+                log::error!("Sending BreakpointRemoved response failed: {e}");
+            }
         } else {
-            log::error!(
-                "Could not find breakpoint {:#?}:{line}",
-                str.to_string_lossy()
-            );
+            log::error!("Could not find breakpoint {str}:{line}",);
         }
     }
 
@@ -162,14 +210,25 @@ impl Debugger {
 
     pub fn add_frame(&mut self, class_name: *const c_char, line: i32) -> () {
         let frame = Frame {
-            class_name: make_cstring(class_name),
+            class_name: self.decode_string(class_name),
             line,
         };
         self.callstack.push(frame);
     }
 
     pub fn current_object_name(&mut self, obj_name: *const c_char) -> () {
-        self.current_object_name.replace(make_cstring(obj_name));
+        self.current_object_name = Some(self.decode_string(obj_name));
+    }
+
+    /// Decode an Unreal-encoded string to UTF-8.
+    fn decode_string(&mut self, ptr: *const c_char) -> String {
+        let str = make_cstr(ptr);
+        return iso8859_1::decode_to_string(str.to_bytes());
+    }
+
+    /// Encode a UTF-8 string to Unreal.
+    fn encode_string(&mut self, s: &str) -> Vec<u8> {
+        iso8859_1::encode_to_vec(s)
     }
 }
 
@@ -185,7 +244,7 @@ pub fn initialize(cb: UnrealCallback) -> () {
         let _ = init_logger();
 
         // Construct the debugger state.
-        dbg.replace(Debugger::new());
+        dbg.replace(Debugger::new(cb));
 
         // Start the main loop that will listen for connections so we can
         // communiate the debugger state to the adapter.
@@ -233,8 +292,8 @@ fn main_loop(cb: UnrealCallback) -> () {
 ///
 /// We accept only a single connection at a time, if multiple adapters attempt to connect
 /// we'll process them in sequence.
-fn handle_connection(server: &mut TcpListener, _cb: UnrealCallback) -> Result<(), io::Error> {
-    let (stream, addr) = server.accept()?;
+fn handle_connection(server: &mut TcpListener, _cb: UnrealCallback) -> Result<(), DebuggerError> {
+    let (stream, addr) = server.accept().or(Err(DebuggerError::InitializeFailure))?;
     log::info!("Received connection from {addr}");
 
     let mut deserializer =
@@ -242,7 +301,7 @@ fn handle_connection(server: &mut TcpListener, _cb: UnrealCallback) -> Result<()
     while let Some(command) = deserializer.next() {
         let mut hnd = DEBUGGER.lock().unwrap();
         let dbg = hnd.as_mut().unwrap();
-        dbg.handle_command(command?);
+        dbg.handle_command(command?)?;
     }
     Ok(())
 }
@@ -250,28 +309,7 @@ fn handle_connection(server: &mut TcpListener, _cb: UnrealCallback) -> Result<()
 #[derive(Debug)]
 pub struct UnknownCommandError;
 
-/// Given a pointer to a string from Unreal, return a boxed CStr with the
-/// same contents. This interface deals only with CStrs, since Unreal does not
-/// give us UTF-8 encoded strings. The format might be locale-dependent, but
-/// for INT they are definitely ISO8859-1 encoded. Text conversion is performed
-/// in the debugger adapter, not in this interface.
-///
-/// TODO: What about non-western game locales? What format text do we get?
-fn make_cstring(raw: *const c_char) -> Box<CString> {
-    // The byte vector to use if we have a null pointer: return as an empty string.
-    let mut bytes: Vec<u8> = Vec::new();
-    if raw != ptr::null() {
-        unsafe {
-            let cstr = CStr::from_ptr(raw);
-            // Get a copy of the raw bytes from the given pointer.
-            bytes = cstr.to_bytes().to_owned();
-        }
-    }
-    // Create a new CString with our bytes. These bytes should never contain
-    // interior nulls.
-    return Box::new(CString::new(bytes).unwrap());
-}
-
+/// Convert an unreal C string pointer to a CStr.
 fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
     if raw != ptr::null() {
         unsafe { return CStr::from_ptr(raw) }
@@ -284,42 +322,20 @@ fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
 mod tests {
     use super::*;
 
-    #[test]
-    fn cstr_from_null() {
-        assert_eq!(make_cstring(ptr::null()).to_str().unwrap(), "");
-    }
-
-    #[test]
-    fn cstr_from_text() {
-        let p = "hello world\0".as_ptr() as *const i8;
-        assert_eq!(make_cstring(p).to_str().unwrap(), "hello world");
-    }
-
-    #[test]
-    fn string_ownership() {
-        let mut str = "I'M A STRING\0".to_owned();
-        let ptr = str.as_ptr() as *const i8;
-        let copy = make_cstring(ptr);
-        assert_ne!(ptr, copy.as_ptr());
-        str.make_ascii_lowercase();
-        assert_eq!(copy.to_str().unwrap(), "I'M A STRING");
-    }
+    extern "C" fn callback(_s: *const u8) -> () {}
 
     #[test]
     fn adding_to_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::new(callback);
         dbg.add_class_to_hierarchy(cls);
-        assert_eq!(
-            dbg.class_hierarchy[0].as_ref().to_str().unwrap(),
-            "Package.Class"
-        );
+        assert_eq!(dbg.class_hierarchy[0], "Package.Class");
     }
 
     #[test]
     fn clearing_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::new(callback);
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy.len(), 1);
         dbg.clear_class_hierarchy();
@@ -330,7 +346,7 @@ mod tests {
     fn add_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::new(callback);
         assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 0);
         assert_eq!(dbg.local_watches.len(), 1);
         assert_eq!(dbg.global_watches.len(), 0);
@@ -349,7 +365,7 @@ mod tests {
     fn clear_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::new(callback);
         dbg.add_watch(WatchKind::Local, -1, name, val);
         dbg.add_watch(WatchKind::Global, -1, name, val);
         dbg.add_watch(WatchKind::User, -1, name, val);
@@ -364,14 +380,14 @@ mod tests {
     fn add_watch_invalid_parent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::new(callback);
         dbg.add_watch(WatchKind::Local, 0, name, val);
     }
 
     #[test]
     fn adds_breakpoint() {
         let class_name = "SomeClass\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::new(callback);
         dbg.add_breakpoint(class_name, 10);
         assert_eq!(dbg.breakpoints.len(), 1);
     }
@@ -379,7 +395,7 @@ mod tests {
     #[test]
     fn can_find_breakpoint() {
         let class_name = "SomeClass\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::new(callback);
         dbg.add_breakpoint(class_name, 10);
         dbg.remove_breakpoint(class_name, 10);
         assert_eq!(dbg.breakpoints.len(), 0);
@@ -389,7 +405,7 @@ mod tests {
     fn remove_unknown_breakpoint() {
         let class_name = "SomeClass\0".as_ptr() as *const i8;
         let another_name = "AnotherClass\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::new(callback);
         dbg.add_breakpoint(class_name, 10);
         dbg.remove_breakpoint(another_name, 20);
         assert_eq!(dbg.breakpoints.len(), 1);

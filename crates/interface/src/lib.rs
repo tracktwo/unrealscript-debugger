@@ -9,7 +9,6 @@
 ///
 /// The functions in this interface are thin wrappers that simply pass their
 /// arguments on to corresponding methods on the debugger state instance.
-
 use debugger::{Debugger, WatchKind};
 use log::trace;
 use std::{ffi::c_char, sync::Mutex};

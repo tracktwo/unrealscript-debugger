@@ -13,12 +13,13 @@
 //!
 //! Events are unpredictable, asynchronous events that are not tied to a particular
 //! command (e.g. a log line being added or a break event).
-use serde::{Serialize, Deserialize};
+
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: i32 = 18777;
 
 /// Representation of a breakpoint.
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Breakpoint {
     pub qualified_name: String,
     pub line: i32,
@@ -34,27 +35,26 @@ impl Breakpoint {
 }
 
 /// Commands that can be sent from the adapter to the debugger interface.
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum UnrealCommand {
     /// Initialize a new connection with the given path as a shared memory file.
     Initialize(String),
     /// Set a breakpoint
-    SetBreakpoint(Breakpoint),
+    AddBreakpoint(Breakpoint),
     /// Remove a breakpoint
     RemoveBreakpoint(Breakpoint),
 }
 
 /// Responses that can be sent from the debugger interface to the adapter, but only
 /// in a well-defined order in response to a command from the adapter.
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum UnrealResponse {
     BreakpointAdded(Breakpoint),
     BreakpointRemoved(Breakpoint),
 }
 
 /// Events that can be sent from the interface at any time.
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum UnrealEvent {
     Stopped,
 }
-
