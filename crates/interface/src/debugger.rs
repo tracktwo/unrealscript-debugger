@@ -59,17 +59,24 @@ impl Debugger {
     pub fn handle_command(&mut self, command: UnrealCommand) -> Result<(), DebuggerError> {
         match command {
             UnrealCommand::Initialize(path) => {
+                log::trace!("handle_command: initialize");
                 let buf =
                     SharedRingBuffer::open(&path).or(Err(DebuggerError::InitializeFailure))?;
                 self.response_channel = Some(Sender::new(buf));
                 Ok(())
             }
             UnrealCommand::AddBreakpoint(bp) => {
-                let str = format!("addbreakpoint {}", bp.qualified_name);
+                let str = format!("addbreakpoint {} {}", bp.qualified_name, bp.line);
+                log::trace!("handle_command: {str}");
                 self.invoke_callback(&str);
                 Ok(())
             }
-            UnrealCommand::RemoveBreakpoint(_) => Ok(()),
+            UnrealCommand::RemoveBreakpoint(bp) => {
+                let str = format!("removebreakpoint {} {}", bp.qualified_name, bp.line);
+                log::trace!("handle_command: {str}");
+                self.invoke_callback(&str);
+                Ok(())
+            }
         }
     }
 
@@ -148,6 +155,7 @@ impl Debugger {
             qualified_name: self.decode_string(name),
             line,
         };
+        log::trace!("Added breakpoint at {}:{}", bp.qualified_name, bp.line);
         if let Err(e) = self.send_response(&UnrealResponse::BreakpointAdded(bp)) {
             log::error!("Sending BreakpointAdded response failed: {e}");
         }
@@ -158,6 +166,7 @@ impl Debugger {
             qualified_name: self.decode_string(name),
             line,
         };
+        log::trace!("Removed breakpoint at {}:{}", bp.qualified_name, bp.line);
         if let Err(e) = self.send_response(&UnrealResponse::BreakpointRemoved(bp)) {
             log::error!("Sending BreakpointRemoved response failed: {e}");
         }
