@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Serializer;
 use std::ffi::{c_char, CStr};
 use std::net::{TcpListener, TcpStream};
-use std::ptr;
+use std::{ptr, io};
 use std::{sync::Mutex, thread};
 use textcode::iso8859_1;
 use thiserror::Error;
@@ -17,16 +17,17 @@ use common::{Frame, Watch, WatchKind, DEFAULT_PORT};
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 
 /// A struct representing the debugger state.
-pub struct Debugger {
+pub struct Debugger<W> {
     class_hierarchy: Vec<String>,
     local_watches: Vec<Watch>,
     global_watches: Vec<Watch>,
     user_watches: Vec<Watch>,
     callstack: Vec<Frame>,
     current_object_name: Option<String>,
-    event_channel: Option<Serializer<TcpStream>>,
+    event_channel: Option<Serializer<W>>,
     response_channel: Option<Sender>,
 }
+
 #[derive(Error, Debug)]
 pub enum DebuggerError {
     #[error("Failed to initialize")]
@@ -43,13 +44,14 @@ impl From<serde_json::Error> for DebuggerError {
     }
 }
 
-impl Debugger {
+impl<W> Debugger<W>
+where W: io::Write {
     /// Construct a new debugger instance with an empty state. Note that the callback pointer is
     /// _not_ passed as an argument to the debugger instance. This is because the debugger instance
     /// cannot safely call through the callback as callback calls can immediately re-enter the
     /// interface on the same thread, which would require us to re-acquire the debugger mutex while
     /// we already hold it to perform the callback.
-    pub fn new() -> Debugger {
+    pub fn new() -> Debugger<W> {
         Debugger {
             class_hierarchy: Vec::new(),
             local_watches: Vec::new(),
@@ -62,11 +64,6 @@ impl Debugger {
         }
     }
 
-    /// A new connection has been established from the adapter. Record the tcp stream used to send
-    /// events.
-    pub fn new_connection(&mut self, stream: TcpStream) -> () {
-        self.event_channel = Some(serde_json::Serializer::new(stream));
-    }
 
     /// Handle a command from the adapter. This may generate responses either directly or
     /// indirectly. If the command requires a callback into unreal the encoded string will be
@@ -234,6 +231,14 @@ impl Debugger {
     }
 }
 
+impl Debugger<TcpStream> {
+    /// A new connection has been established from the adapter. Record the tcp stream used to send
+    /// events.
+    pub fn new_connection(&mut self, stream: TcpStream) -> () {
+        self.event_channel = Some(serde_json::Serializer::new(stream));
+    }
+}
+
 /// Initialize the debugger instance. This should be called exactly once when
 /// Unreal first initializes us. Responsible for building the shared state object
 /// the other Unreal entry points will use and spawning the main loop thread
@@ -340,12 +345,29 @@ fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Deserializer;
+
     use super::*;
+
+    struct MockStream<'a> {
+        logs: &'a mut Vec<String>
+    }
+
+    impl io::Write for MockStream<'_> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.logs.push(String::from_utf8(buf.to_vec()).unwrap());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn adding_to_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::<MockStream>::new();
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy[0], "Package.Class");
     }
@@ -353,7 +375,7 @@ mod tests {
     #[test]
     fn clearing_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::<MockStream>::new();
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy.len(), 1);
         dbg.clear_class_hierarchy();
@@ -364,7 +386,7 @@ mod tests {
     fn add_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::<MockStream>::new();
         assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 0);
         assert_eq!(dbg.local_watches.len(), 1);
         assert_eq!(dbg.global_watches.len(), 0);
@@ -383,7 +405,7 @@ mod tests {
     fn clear_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::<MockStream>::new();
         dbg.add_watch(WatchKind::Local, -1, name, val);
         dbg.add_watch(WatchKind::Global, -1, name, val);
         dbg.add_watch(WatchKind::User, -1, name, val);
@@ -398,7 +420,25 @@ mod tests {
     fn add_watch_invalid_parent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let mut dbg = Debugger::<MockStream>::new();
         dbg.add_watch(WatchKind::Local, 0, name, val);
+    }
+
+    #[test]
+    fn log_sends_line() {
+        let mut dbg = Debugger::<MockStream>::new();
+        let mut vec = Vec::new();
+        let mock_stream = MockStream { logs: &mut vec };
+        dbg.event_channel = Some(Serializer::new(mock_stream));
+        let str = "This is a log line\0";
+        dbg.add_line_to_log(str.as_ptr() as *const i8);
+
+        let concat = vec.iter().fold(String::new(), |mut x , y| { x.push_str(y); x } );
+        let deserializer = Deserializer::from_str(&concat);
+        let destr: UnrealEvent = deserializer.into_iter().next().unwrap().unwrap();
+        match destr {
+            UnrealEvent::Log(s) => assert_eq!(str[..str.len()-1], s),
+            _ => panic!("Expected a log")
+        };
     }
 }

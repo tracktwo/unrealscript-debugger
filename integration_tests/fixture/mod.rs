@@ -1,6 +1,6 @@
 use std::{
     io::Stdout,
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -31,7 +31,7 @@ pub fn setup<F>(
 )
 where
     F: FnOnce(
-            &mut Debugger,
+            &mut Debugger<TcpStream>,
             &mut dyn Iterator<Item = Result<UnrealCommand, serde_json::Error>>,
         ) -> ()
         + Send

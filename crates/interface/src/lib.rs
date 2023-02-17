@@ -12,10 +12,10 @@
 use common::WatchKind;
 use debugger::Debugger;
 use log::trace;
-use std::{ffi::c_char, sync::Mutex};
+use std::{ffi::c_char, sync::Mutex, net::TcpStream};
 
 /// The debugger state. Calls from Unreal are dispatched into this instance.
-static DEBUGGER: Mutex<Option<Debugger>> = Mutex::new(None);
+static DEBUGGER: Mutex<Option<Debugger<TcpStream>>> = Mutex::new(None);
 
 /// The unreal callback type. Note that the debugger specification defines
 /// it as accepting a 'const char*' parameter but we use u8 here. This is

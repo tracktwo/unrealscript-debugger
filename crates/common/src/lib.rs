@@ -86,7 +86,7 @@ pub enum UnrealResponse {
 }
 
 /// Events that can be sent from the interface at any time.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum UnrealEvent {
     Log(String),
     Stopped,
