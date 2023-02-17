@@ -12,7 +12,7 @@
 use common::WatchKind;
 use debugger::Debugger;
 use log::trace;
-use std::{ffi::c_char, sync::Mutex, net::TcpStream};
+use std::{ffi::c_char, net::TcpStream, sync::Mutex};
 
 /// The debugger state. Calls from Unreal are dispatched into this instance.
 static DEBUGGER: Mutex<Option<Debugger<TcpStream>>> = Mutex::new(None);

@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Serializer;
 use std::ffi::{c_char, CStr};
 use std::net::{TcpListener, TcpStream};
-use std::{ptr, io};
+use std::{io, ptr};
 use std::{sync::Mutex, thread};
 use textcode::iso8859_1;
 use thiserror::Error;
@@ -45,7 +45,9 @@ impl From<serde_json::Error> for DebuggerError {
 }
 
 impl<W> Debugger<W>
-where W: io::Write {
+where
+    W: io::Write,
+{
     /// Construct a new debugger instance with an empty state. Note that the callback pointer is
     /// _not_ passed as an argument to the debugger instance. This is because the debugger instance
     /// cannot safely call through the callback as callback calls can immediately re-enter the
@@ -63,7 +65,6 @@ where W: io::Write {
             response_channel: None,
         }
     }
-
 
     /// Handle a command from the adapter. This may generate responses either directly or
     /// indirectly. If the command requires a callback into unreal the encoded string will be
@@ -350,7 +351,7 @@ mod tests {
     use super::*;
 
     struct MockStream<'a> {
-        logs: &'a mut Vec<String>
+        logs: &'a mut Vec<String>,
     }
 
     impl io::Write for MockStream<'_> {
@@ -433,12 +434,15 @@ mod tests {
         let str = "This is a log line\0";
         dbg.add_line_to_log(str.as_ptr() as *const i8);
 
-        let concat = vec.iter().fold(String::new(), |mut x , y| { x.push_str(y); x } );
+        let concat = vec.iter().fold(String::new(), |mut x, y| {
+            x.push_str(y);
+            x
+        });
         let deserializer = Deserializer::from_str(&concat);
         let destr: UnrealEvent = deserializer.into_iter().next().unwrap().unwrap();
         match destr {
-            UnrealEvent::Log(s) => assert_eq!(str[..str.len()-1], s),
-            _ => panic!("Expected a log")
+            UnrealEvent::Log(s) => assert_eq!(str[..str.len() - 1], s),
+            _ => panic!("Expected a log"),
         };
     }
 }

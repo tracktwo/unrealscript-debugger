@@ -1,8 +1,8 @@
 use std::{net::TcpStream, time::Duration};
 
-use common::{Breakpoint, UnrealCommand, UnrealEvent, UnrealResponse};
+use common::{Breakpoint, UnrealCommand, UnrealResponse};
 use ipmpsc::{Receiver, SharedRingBuffer};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{de::IoRead, Deserializer, Serializer};
 use thiserror::Error;
 
@@ -42,8 +42,6 @@ pub trait UnrealChannel: Send + 'static {
 
     // Remove a breakpoint, receiving the removed breakpoint from unreal.
     fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError>;
-
-    fn next_event(&mut self) -> Option<Result<UnrealEvent, ChannelError>>;
 }
 
 /// The DefaultChannel uses two communications modes for talking to the debugger interface.
@@ -64,7 +62,6 @@ pub trait UnrealChannel: Send + 'static {
 ///  main message processing thread.
 pub struct DefaultChannel {
     response_receiver: Receiver,
-    event_receiver: Deserializer<IoRead<TcpStream>>,
     sender: Serializer<TcpStream>,
 }
 
@@ -104,15 +101,12 @@ impl UnrealChannel for DefaultChannel {
             _ => Err(ChannelError::ProtocolError),
         }
     }
-
-    fn next_event(&mut self) -> Option<Result<UnrealEvent, ChannelError>> {
-        let res = UnrealEvent::deserialize(&mut self.event_receiver);
-        Some(res.map_err(|e| ChannelError::SerializationError(e)))
-    }
 }
 
 /// Connect to an unreal debugger adapter running at the given port number on the local computer.
-pub fn connect(port: i32) -> Result<Box<dyn UnrealChannel>, ChannelError> {
+pub fn connect(
+    port: i32,
+) -> Result<(Box<dyn UnrealChannel>, Deserializer<IoRead<TcpStream>>), ChannelError> {
     let tcp =
         TcpStream::connect(format!("127.0.0.1:{port}")).or(Err(ChannelError::ConnectionError))?;
     let (path, shmem) =
@@ -123,9 +117,11 @@ pub fn connect(port: i32) -> Result<Box<dyn UnrealChannel>, ChannelError> {
     UnrealCommand::Initialize(path).serialize(&mut serializer)?;
 
     let deserializer = serde_json::Deserializer::from_reader(tcp);
-    Ok(Box::new(DefaultChannel {
-        response_receiver: Receiver::new(shmem),
-        event_receiver: deserializer,
-        sender: serializer,
-    }))
+    Ok((
+        Box::new(DefaultChannel {
+            response_receiver: Receiver::new(shmem),
+            sender: serializer,
+        }),
+        deserializer,
+    ))
 }

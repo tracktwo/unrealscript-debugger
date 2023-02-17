@@ -11,6 +11,7 @@ use dap::{
     prelude::Adapter,
     requests::{self, Command, Request},
     responses::ResponseBody,
+    server::EventSender,
 };
 use interface::debugger::Debugger;
 use serde_json::{json, Map, Value};
@@ -39,12 +40,14 @@ where
 {
     let mut adapter = UnrealscriptAdapter::new();
     let mut client = UnrealscriptClient::new(std::io::stdout());
-    let server = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = server.local_addr().unwrap().port();
+
+    adapter.event_channel(EventSender::new());
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tcp.local_addr().unwrap().port();
 
     let interface_thread = thread::spawn(move || {
         let mut dbg = Debugger::new();
-        let (stream, _addr) = server.accept().unwrap();
+        let (stream, _addr) = tcp.accept().unwrap();
         let mut deserializer = serde_json::Deserializer::from_reader(stream.try_clone().unwrap())
             .into_iter::<UnrealCommand>();
 

@@ -9,5 +9,7 @@ fn simple_log() {
         dbg.add_line_to_log("Log line!\0".as_ptr() as *const i8);
     });
 
+    // The adapter should receive the log event and dispatch it to the event sender.
+
     fixture::wait_for_thread(handle);
 }

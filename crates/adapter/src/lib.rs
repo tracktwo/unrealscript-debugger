@@ -4,25 +4,32 @@ mod comm;
 
 use std::{
     collections::BTreeMap,
+    net::TcpStream,
     path::{Component, Path},
+    thread::JoinHandle,
 };
 
 use dap::{
+    events::OutputEventBody,
     prelude::*,
     requests::{AttachRequestArguments, InitializeArguments, SetBreakpointsArguments},
     responses::ErrorMessage,
-    types::{Capabilities, Source, Thread},
+    server::EventSender,
+    types::{Capabilities, OutputEventCategory, Source, Thread},
 };
-use serde_json::Value;
+use serde_json::{de::IoRead, Deserializer, Value};
+use std::fmt::Debug;
 use thiserror::Error;
 
-use common::{Breakpoint, DEFAULT_PORT};
+use common::{Breakpoint, UnrealEvent, DEFAULT_PORT};
 
 use comm::{ChannelError, UnrealChannel};
 
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
     channel: Option<Box<dyn UnrealChannel>>,
+    event_thread: Option<JoinHandle<Result<(), UnrealscriptAdapterError>>>,
+    event_channel: Option<EventSender<UnrealscriptAdapterError>>,
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
     one_based_lines: bool,
@@ -33,6 +40,8 @@ impl UnrealscriptAdapter {
         UnrealscriptAdapter {
             class_map: BTreeMap::new(),
             channel: None,
+            event_thread: None,
+            event_channel: None,
             one_based_lines: true,
         }
     }
@@ -118,6 +127,14 @@ impl Adapter for UnrealscriptAdapter {
                 e.to_error_message(),
             )),
         }
+    }
+
+    /// Receive the event channel from the server
+    fn event_channel(&mut self, channel: dap::server::EventSender<Self::Error>) -> ()
+    where
+        <Self as Adapter>::Error: Debug,
+    {
+        self.event_channel = Some(channel);
     }
 }
 
@@ -255,10 +272,50 @@ impl UnrealscriptAdapter {
         log::info!("Connecting to port {port}");
         // Connect to the unrealscript interface and set up the communications channel between
         // it and this adapter.
-        self.channel = Some(comm::connect(port)?);
+        let conn = comm::connect(port)?;
+
+        // The adapter keeps the channel for communicating with the interface: it can send commands
+        // and receive responses.
+        self.channel = Some(conn.0);
+
+        // The event receiving channel is spun out to a separate thread.
+        let event_receiver = conn.1;
+        let event_sender = self.event_channel.as_ref().unwrap().clone();
+        self.event_thread = Some(std::thread::spawn(move || {
+            event_loop(event_sender, event_receiver)
+        }));
 
         Ok(ResponseBody::Attach)
     }
+}
+
+/// The event processing loop for the adapter.
+///
+/// This is spun up in a dedicated thread once we attacht to the Unreal interface. This will
+/// receive a stream of serialized UnrealEvent messages, translate them to DAP events, and dispatch
+/// them to the client.
+///
+/// The adapter itself does not see any events and has no mechanism to process them, but events we
+/// pass through to DAP may trigger requests that the adapter will handle.
+fn event_loop(
+    sender: EventSender<Error>,
+    receiver: Deserializer<IoRead<TcpStream>>,
+) -> Result<(), UnrealscriptAdapterError> {
+    for evt in receiver.into_iter::<UnrealEvent>() {
+        match evt.map_err(|e| ChannelError::SerializationError(e))? {
+            UnrealEvent::Log(msg) => {
+                sender
+                    .send(events::EventBody::Output(OutputEventBody {
+                        category: Some(OutputEventCategory::Stdout),
+                        output: msg,
+                        ..Default::default()
+                    }))
+                    .or(Err(ChannelError::ConnectionError))?;
+            }
+            UnrealEvent::Stopped => todo!(),
+        }
+    }
+    Ok(())
 }
 
 /// Information about a class.
@@ -335,7 +392,6 @@ pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError
 
 #[cfg(test)]
 mod tests {
-    use common::UnrealEvent;
     use dap::types::{Source, SourceBreakpoint};
 
     use super::*;
@@ -348,10 +404,6 @@ mod tests {
         }
         fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
             Ok(bp)
-        }
-
-        fn next_event(&mut self) -> Option<Result<UnrealEvent, ChannelError>> {
-            None
         }
     }
 

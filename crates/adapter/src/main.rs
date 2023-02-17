@@ -17,7 +17,6 @@ fn main() {
     let client = UnrealscriptClient::new(std::io::stdout());
     let mut server = Server::new(adapter, client);
 
-    let _event_sender = server.clone_sender();
     log::info!("Ready to start!");
 
     // Spawn a new thread for the server to process messages in. This will loop
