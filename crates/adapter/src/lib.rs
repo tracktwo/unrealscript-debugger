@@ -1,19 +1,17 @@
-pub mod client;
-
 mod comm;
 
 use std::{
     collections::BTreeMap,
     net::TcpStream,
     path::{Component, Path},
+    thread::JoinHandle,
 };
 
 use dap::{
-    events::OutputEventBody,
+    events::{EventSend, OutputEventBody},
     prelude::*,
     requests::{AttachRequestArguments, InitializeArguments, SetBreakpointsArguments},
     responses::ErrorMessage,
-    server::EventSender,
     types::{Capabilities, OutputEventCategory, Source, Thread},
 };
 use serde_json::{de::IoRead, Deserializer, Value};
@@ -27,6 +25,7 @@ use comm::{ChannelError, UnrealChannel};
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
     channel: Option<Box<dyn UnrealChannel>>,
+    event_thread: Option<JoinHandle<Result<(), UnrealscriptAdapterError>>>,
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
     one_based_lines: bool,
@@ -37,6 +36,7 @@ impl UnrealscriptAdapter {
         UnrealscriptAdapter {
             class_map: BTreeMap::new(),
             channel: None,
+            event_thread: None,
             one_based_lines: true,
         }
     }
@@ -259,7 +259,7 @@ impl UnrealscriptAdapter {
 
         log::info!("Connecting to port {port}");
 
-        let event_sender = ctx.get_event_sender(); 
+        let event_sender = ctx.get_event_sender();
         // Connect to the unrealscript interface and set up the communications channel between
         // it and this adapter.
         let conn = comm::connect(port)?;
@@ -270,7 +270,6 @@ impl UnrealscriptAdapter {
 
         // The event receiving channel is spun out to a separate thread.
         let event_receiver = conn.1;
-        let event_sender = self.event_channel.as_ref().unwrap().clone();
         self.event_thread = Some(std::thread::spawn(move || {
             event_loop(event_sender, event_receiver)
         }));
@@ -288,14 +287,14 @@ impl UnrealscriptAdapter {
 /// The adapter itself does not see any events and has no mechanism to process them, but events we
 /// pass through to DAP may trigger requests that the adapter will handle.
 fn event_loop(
-    sender: EventSender<Error>,
+    sender: Box<dyn EventSend>,
     receiver: Deserializer<IoRead<TcpStream>>,
 ) -> Result<(), UnrealscriptAdapterError> {
     for evt in receiver.into_iter::<UnrealEvent>() {
         match evt.map_err(|e| ChannelError::SerializationError(e))? {
             UnrealEvent::Log(msg) => {
                 sender
-                    .send(events::EventBody::Output(OutputEventBody {
+                    .send_event(events::EventBody::Output(OutputEventBody {
                         category: Some(OutputEventCategory::Stdout),
                         output: msg,
                         ..Default::default()

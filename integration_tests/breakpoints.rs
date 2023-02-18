@@ -20,7 +20,7 @@ pub const PACKAGE_CLASSNAME: &str = if cfg!(windows) {
 /// Set a breakpoint and then mock hitting it, ensuring we get a break event at the expected position.
 #[test]
 fn hit_breakpoint() {
-    let (mut adapter, mut client, handle) = fixture::setup(|dbg, deserializer| {
+    let (mut adapter, mut client, _receiver, handle) = fixture::setup(|dbg, deserializer| {
         // Next command should be add breakpoint
         let command = deserializer.next().unwrap().unwrap();
         assert!(matches!(command, UnrealCommand::AddBreakpoint(_)));
@@ -62,7 +62,7 @@ fn hit_breakpoint() {
 /// Test removing a breakpoint
 #[test]
 fn remove_breakpoint() {
-    let (mut adapter, mut client, handle) = fixture::setup(|dbg, deserializer| {
+    let (mut adapter, mut client, _receiver, handle) = fixture::setup(|dbg, deserializer| {
         // Next command should be add breakpoint
         let command = deserializer.next().unwrap().unwrap();
         assert!(matches!(command, UnrealCommand::AddBreakpoint(_)));
