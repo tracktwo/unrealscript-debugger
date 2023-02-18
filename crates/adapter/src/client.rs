@@ -7,12 +7,12 @@ use dap::{
     responses::{Response, ResponseBody},
 };
 
-pub struct UnrealscriptClient<W: Write> {
-    client: BasicClient<W>,
+pub struct UnrealscriptClient<'a, W: Write> {
+    client: BasicClient<'a, W>,
 }
 
-impl<W: Write> UnrealscriptClient<W> {
-    pub fn new(writer: W) -> UnrealscriptClient<W> {
+impl<'a ,W: Write> UnrealscriptClient<'a, W> {
+    pub fn new(writer: W) -> UnrealscriptClient<'a, W> {
         return UnrealscriptClient {
             client: BasicClient::new(writer),
         };

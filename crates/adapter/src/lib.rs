@@ -6,7 +6,6 @@ use std::{
     collections::BTreeMap,
     net::TcpStream,
     path::{Component, Path},
-    thread::JoinHandle,
 };
 
 use dap::{
@@ -28,8 +27,6 @@ use comm::{ChannelError, UnrealChannel};
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
     channel: Option<Box<dyn UnrealChannel>>,
-    event_thread: Option<JoinHandle<Result<(), UnrealscriptAdapterError>>>,
-    event_channel: Option<EventSender<UnrealscriptAdapterError>>,
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
     one_based_lines: bool,
@@ -40,8 +37,6 @@ impl UnrealscriptAdapter {
         UnrealscriptAdapter {
             class_map: BTreeMap::new(),
             channel: None,
-            event_thread: None,
-            event_channel: None,
             one_based_lines: true,
         }
     }
@@ -108,7 +103,7 @@ impl Adapter for UnrealscriptAdapter {
                 return Ok(Response::make_ack(ctx.next_seq(), &request)
                     .expect("ConfigurationDone can be acked"))
             }
-            Command::Attach(args) => self.attach(args),
+            Command::Attach(args) => self.attach(args, ctx),
             Command::Disconnect(_args) => {
                 return Ok(
                     Response::make_ack(ctx.next_seq(), &request).expect("disconnect can be acked")
@@ -127,14 +122,6 @@ impl Adapter for UnrealscriptAdapter {
                 e.to_error_message(),
             )),
         }
-    }
-
-    /// Receive the event channel from the server
-    fn event_channel(&mut self, channel: dap::server::EventSender<Self::Error>) -> ()
-    where
-        <Self as Adapter>::Error: Debug,
-    {
-        self.event_channel = Some(channel);
     }
 }
 
@@ -264,12 +251,15 @@ impl UnrealscriptAdapter {
     fn attach(
         &mut self,
         args: &AttachRequestArguments,
+        ctx: &mut dyn Context,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         log::info!("Attach request");
 
         let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
 
         log::info!("Connecting to port {port}");
+
+        let event_sender = ctx.get_event_sender(); 
         // Connect to the unrealscript interface and set up the communications channel between
         // it and this adapter.
         let conn = comm::connect(port)?;
