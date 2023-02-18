@@ -1,5 +1,4 @@
 use std::{
-    io::Stdout,
     net::{TcpListener, TcpStream},
     sync::mpsc::{self, Receiver, SendError, Sender},
     thread::{self, JoinHandle},
@@ -10,9 +9,9 @@ use adapter::UnrealscriptAdapter;
 use common::UnrealCommand;
 use dap::{
     events::{EventBody, EventSend},
-    prelude::{Adapter, BasicClient},
+    prelude::{Adapter, Context},
     requests::{self, Command, Request},
-    responses::ResponseBody,
+    responses::ResponseBody, reverse_requests::ReverseRequest,
 };
 use interface::debugger::Debugger;
 use serde_json::{json, Map, Value};
@@ -38,6 +37,41 @@ impl Clone for MockEventSender {
     }
 }
 
+pub struct MockContext {
+    seq: i64,
+    event_sender: MockEventSender,
+}
+
+/// A mock context. Events and reverse requests sent to this context are silently discarded.
+impl Context for MockContext {
+    fn send_event(&mut self, _event: dap::prelude::Event) -> dap::client::Result<()> {
+        Ok(())
+    }
+
+    fn send_reverse_request(&mut self, _request: ReverseRequest) -> dap::client::Result<()> {
+        Ok(())
+    }
+
+    fn request_exit(&mut self) {
+    }
+
+    fn cancel_exit(&mut self) {
+    }
+
+    fn get_exit_state(&self) -> bool {
+        false
+    }
+
+    fn next_seq(&mut self) -> i64 {
+        self.seq += 1;
+        self.seq
+    }
+
+    fn get_event_sender(&mut self) -> Box<dyn EventSend> {
+        Box::new(self.event_sender.clone())
+    }
+}
+
 /// Integration test setup:
 /// - construct an adapter and client
 /// - Create a channel to receive events and hook this up to the client
@@ -53,7 +87,7 @@ pub fn setup<F>(
     f: F,
 ) -> (
     UnrealscriptAdapter,
-    BasicClient<Stdout, MockEventSender>,
+    MockContext,
     Receiver<EventBody>,
     JoinHandle<()>,
 )
@@ -68,7 +102,7 @@ where
     let mut adapter = UnrealscriptAdapter::new();
     let (sender, receiver) = mpsc::channel();
     let event_sender = MockEventSender { sender };
-    let mut client = BasicClient::new(std::io::stdout(), event_sender);
+    let mut context = MockContext{ seq: 0, event_sender };
 
     let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = tcp.local_addr().unwrap().port();
@@ -100,7 +134,7 @@ where
                     ..Default::default()
                 }),
             },
-            &mut client,
+            &mut context,
         )
         .unwrap();
 
@@ -121,7 +155,7 @@ where
                     ..Default::default()
                 }),
             },
-            &mut client,
+            &mut context,
         )
         .unwrap();
 
@@ -130,7 +164,7 @@ where
         _o => assert!(false, "Expected an attach response: {_o:#?}"),
     }
 
-    (adapter, client, receiver, interface_thread)
+    (adapter, context, receiver, interface_thread)
 }
 
 /// Helper to wait for the spawned interface thread to end without blocking tests forever if
