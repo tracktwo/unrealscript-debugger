@@ -8,10 +8,11 @@ use std::{
 use adapter::UnrealscriptAdapter;
 use common::UnrealCommand;
 use dap::{
-    events::{EventBody, EventSend},
-    prelude::{Adapter, Context},
+    events::EventSend,
+    prelude::{Adapter, Context, Event},
     requests::{self, Command, Request},
-    responses::ResponseBody, reverse_requests::ReverseRequest,
+    responses::ResponseBody,
+    reverse_requests::ReverseRequest,
 };
 use interface::debugger::Debugger;
 use serde_json::{json, Map, Value};
@@ -20,11 +21,11 @@ use serde_json::{json, Map, Value};
 // end of the channel is returned as part of fixture setup and the event can be
 // received there.
 pub struct MockEventSender {
-    sender: Sender<EventBody>,
+    sender: Sender<Event>,
 }
 
 impl EventSend for MockEventSender {
-    fn send_event(&self, t: EventBody) -> Result<(), SendError<EventBody>> {
+    fn send_event(&self, t: Event) -> Result<(), SendError<Event>> {
         self.sender.send(t)
     }
 }
@@ -38,7 +39,6 @@ impl Clone for MockEventSender {
 }
 
 pub struct MockContext {
-    seq: i64,
     event_sender: MockEventSender,
 }
 
@@ -52,19 +52,12 @@ impl Context for MockContext {
         Ok(())
     }
 
-    fn request_exit(&mut self) {
-    }
+    fn request_exit(&mut self) {}
 
-    fn cancel_exit(&mut self) {
-    }
+    fn cancel_exit(&mut self) {}
 
     fn get_exit_state(&self) -> bool {
         false
-    }
-
-    fn next_seq(&mut self) -> i64 {
-        self.seq += 1;
-        self.seq
     }
 
     fn get_event_sender(&mut self) -> Box<dyn EventSend> {
@@ -88,7 +81,7 @@ pub fn setup<F>(
 ) -> (
     UnrealscriptAdapter,
     MockContext,
-    Receiver<EventBody>,
+    Receiver<Event>,
     JoinHandle<()>,
 )
 where
@@ -102,7 +95,7 @@ where
     let mut adapter = UnrealscriptAdapter::new();
     let (sender, receiver) = mpsc::channel();
     let event_sender = MockEventSender { sender };
-    let mut context = MockContext{ seq: 0, event_sender };
+    let mut context = MockContext { event_sender };
 
     let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = tcp.local_addr().unwrap().port();

@@ -13,7 +13,7 @@ fn simple_log() {
 
     // The adapter should receive the log event and dispatch it to the event sender.
     let evt = receiver.recv().unwrap();
-    match evt {
+    match evt.body {
         EventBody::Output(obody) => {
             assert!(matches!(
                 obody.category.unwrap(),

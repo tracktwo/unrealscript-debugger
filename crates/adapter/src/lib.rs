@@ -100,14 +100,11 @@ impl Adapter for UnrealscriptAdapter {
             Command::SetBreakpoints(args) => self.set_breakpoints(args),
             Command::Threads => self.threads(),
             Command::ConfigurationDone => {
-                return Ok(Response::make_ack(ctx.next_seq(), &request)
-                    .expect("ConfigurationDone can be acked"))
+                return Ok(Response::make_ack(&request).expect("ConfigurationDone can be acked"))
             }
             Command::Attach(args) => self.attach(args, ctx),
             Command::Disconnect(_args) => {
-                return Ok(
-                    Response::make_ack(ctx.next_seq(), &request).expect("disconnect can be acked")
-                )
+                return Ok(Response::make_ack(&request).expect("disconnect can be acked"))
             }
             _ => Err(UnrealscriptAdapterError::UnhandledCommandError(
                 request.command.name().to_string(),
@@ -115,12 +112,8 @@ impl Adapter for UnrealscriptAdapter {
         };
 
         match response {
-            Ok(body) => Ok(Response::make_success(ctx.next_seq(), &request, body)),
-            Err(e) => Ok(Response::make_error(
-                ctx.next_seq(),
-                &request,
-                e.to_error_message(),
-            )),
+            Ok(body) => Ok(Response::make_success(&request, body)),
+            Err(e) => Ok(Response::make_error(&request, e.to_error_message())),
         }
     }
 }
@@ -294,11 +287,13 @@ fn event_loop(
         match evt.map_err(|e| ChannelError::SerializationError(e))? {
             UnrealEvent::Log(msg) => {
                 sender
-                    .send_event(events::EventBody::Output(OutputEventBody {
-                        category: Some(OutputEventCategory::Stdout),
-                        output: msg,
-                        ..Default::default()
-                    }))
+                    .send_event(events::Event {
+                        body: events::EventBody::Output(OutputEventBody {
+                            category: Some(OutputEventCategory::Stdout),
+                            output: msg,
+                            ..Default::default()
+                        }),
+                    })
                     .or(Err(ChannelError::ConnectionError))?;
             }
             UnrealEvent::Stopped => todo!(),
