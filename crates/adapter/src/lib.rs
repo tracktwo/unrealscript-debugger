@@ -8,11 +8,11 @@ use std::{
 };
 
 use dap::{
-    events::{EventSend, OutputEventBody},
+    events::{EventSend, OutputEventBody, StoppedEventBody, ExitedEventBody},
     prelude::*,
     requests::{AttachRequestArguments, InitializeArguments, SetBreakpointsArguments},
     responses::ErrorMessage,
-    types::{Capabilities, OutputEventCategory, Source, Thread},
+    types::{Capabilities, OutputEventCategory, Source, Thread, StoppedEventReason},
 };
 use serde_json::{de::IoRead, Deserializer, Value};
 use std::fmt::Debug;
@@ -22,10 +22,17 @@ use common::{Breakpoint, UnrealEvent, DEFAULT_PORT};
 
 use comm::{ChannelError, UnrealChannel};
 
+/// The thread ID to use for the unrealscript thread. The unreal debugger only supports one thread.
+const UNREAL_THREAD_ID: i64 = 1;
+
+/// The exit code to send to the client when we've detected that the interface has shut down in
+/// some unexpected way.
+const UNREAL_UNEXPECTED_EXIT_CODE: i64 = 1;
+
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
     channel: Option<Box<dyn UnrealChannel>>,
-    event_thread: Option<JoinHandle<Result<(), UnrealscriptAdapterError>>>,
+    event_thread: Option<JoinHandle<()>>,
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
     one_based_lines: bool,
@@ -255,6 +262,8 @@ impl UnrealscriptAdapter {
         let event_sender = ctx.get_event_sender();
         // Connect to the unrealscript interface and set up the communications channel between
         // it and this adapter.
+        //
+        // TODO This API is awful, fix it.
         let conn = comm::connect(port)?;
 
         // The adapter keeps the channel for communicating with the interface: it can send commands
@@ -279,13 +288,19 @@ impl UnrealscriptAdapter {
 ///
 /// The adapter itself does not see any events and has no mechanism to process them, but events we
 /// pass through to DAP may trigger requests that the adapter will handle.
+///
+/// This loop will return when we receive a Disconnect event or either the sending channel from
+/// Unreal or the receiving side of the event channel are closed. The sending channel closing
+/// likely indicates a fatal error in the interface: if the debugger is stopped gracefully from the
+/// Unreal side we expect to receive a Disconnect event first. In this case we will send an
+/// 'exited' event with a non-zero code before returning.
 fn event_loop(
     sender: Box<dyn EventSend>,
     receiver: Deserializer<IoRead<TcpStream>>,
-) -> Result<(), UnrealscriptAdapterError> {
+) -> () {
     for evt in receiver.into_iter::<UnrealEvent>() {
-        match evt.map_err(|e| ChannelError::SerializationError(e))? {
-            UnrealEvent::Log(msg) => {
+        let res = match evt {
+            Ok(UnrealEvent::Log(msg)) => {
                 sender
                     .send_event(events::Event {
                         body: events::EventBody::Output(OutputEventBody {
@@ -294,12 +309,51 @@ fn event_loop(
                             ..Default::default()
                         }),
                     })
-                    .or(Err(ChannelError::ConnectionError))?;
             }
-            UnrealEvent::Stopped => todo!(),
+            Ok(UnrealEvent::Stopped) => 
+                sender
+                .send_event(events::Event {
+                        body: events::EventBody::Stopped(StoppedEventBody {
+                            reason: StoppedEventReason::Breakpoint,
+                            thread_id: Some(UNREAL_THREAD_ID),
+                            description: None,
+                            preserve_focus_hint: None,
+                            text: None,
+                            all_threads_stopped: None,
+                            hit_breakpoint_ids: None,
+                        })
+                    }),
+            Ok(UnrealEvent::Disconnect) => {
+                log::info!("Received disconnect event from Unreal. Closing down the event loop");
+
+                // It's fine if we fail to send this event, in that case the adapter is already
+                // closing down too.
+                sender.send_event(events::Event {
+                    body: events::EventBody::Terminated(None) }).ok();
+                return;
+            }
+
+            Err(e) => {
+                log::error!("Deserialization error receiving event from the debugger interface: {e}");
+                continue;
+            },
+        };
+
+        // If sending the event through the sender returned an error that can only indicate that
+        // the receiving side has closed the channel. This indicates the adapter is shutting down,
+        // so we can return.
+        if res.is_err() {
+            return;
         }
     }
-    Ok(())
+
+    // The iterator is exhausted, which means we've lost the connection to the interface without
+    // receiving a 'Disconnect' event. This likely means something terrible has happened to Unreal.
+    // Send the adapter an "Exited" event with a non-zero exit code to indicate this and then
+    // stop. Again if this fails to send because the adapter is closing down too then we can just
+    // ignore the error.
+    sender.send_event(events::Event {
+        body: events::EventBody::Exited(ExitedEventBody{exit_code: UNREAL_UNEXPECTED_EXIT_CODE})}).ok();
 }
 
 /// Information about a class.

@@ -207,8 +207,10 @@ where
 
     /// A line has been added to the log. Send directly to the adapter (if connected).
     pub fn add_line_to_log(&mut self, text: *const c_char) -> () {
-        let str = self.decode_string(text);
+        let mut str = self.decode_string(text);
         log::trace!("Add to log: {str}");
+        // Unreal does not add newlines to log messages, add one for readability.
+        str.push_str("\r\n");
         if let Some(stream) = &mut self.event_channel {
             if let Err(e) = UnrealEvent::Log(str).serialize(stream) {
                 log::error!("Sending log failed: {e}");
@@ -441,7 +443,9 @@ mod tests {
         let deserializer = Deserializer::from_str(&concat);
         let destr: UnrealEvent = deserializer.into_iter().next().unwrap().unwrap();
         match destr {
-            UnrealEvent::Log(s) => assert_eq!(str[..str.len() - 1], s),
+            // Compare the strings. Ignore the null byte in our sending string, and ignore the \r\n
+            // appended to the log line in the event.
+            UnrealEvent::Log(s) => assert_eq!(str[..str.len() - 1], s[..s.len() - 2]),
             _ => panic!("Expected a log"),
         };
     }

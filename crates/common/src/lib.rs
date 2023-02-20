@@ -88,6 +88,11 @@ pub enum UnrealResponse {
 /// Events that can be sent from the interface at any time.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UnrealEvent {
+    /// Unreal has generated an output log line.
     Log(String),
+    /// The debugger has stopped. Unreal does not tell us why.
     Stopped,
+    /// The debugger has disconnected. This can happen when the user either
+    /// closes the game or uses `toggledebugger to disable debugging.
+    Disconnect,
 }
