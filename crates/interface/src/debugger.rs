@@ -11,7 +11,9 @@ use thiserror::Error;
 
 use super::UnrealCallback;
 use super::DEBUGGER;
-use common::{Breakpoint, UnrealCommand, UnrealEvent, UnrealResponse, StackTraceResponse, StackTraceRequest};
+use common::{
+    Breakpoint, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent, UnrealResponse,
+};
 use common::{Frame, Watch, WatchKind, DEFAULT_PORT};
 
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
@@ -28,6 +30,7 @@ pub struct Debugger<W> {
     response_channel: Option<Sender>,
     saw_show_dll: bool,
     pending_break_event: bool,
+    current_line: i32,
 }
 
 #[derive(Error, Debug)]
@@ -67,6 +70,7 @@ where
             response_channel: None,
             saw_show_dll: false,
             pending_break_event: false,
+            current_line: 0,
         }
     }
 
@@ -106,9 +110,23 @@ where
                 // just return the current call stack state.
                 let response = self.handle_stacktrace_request(&stack);
                 self.send_response(&UnrealResponse::StackTrace(response))?;
-                
+
                 // This request has been completely handled, no need for the caller to invoke the
                 // callback.
+                Ok(None)
+            }
+            UnrealCommand::WatchCount(kind) => {
+                log::trace!("WatchCount: {kind:?}");
+                let count = self.watch_count(kind);
+                self.send_response(&UnrealResponse::WatchCount(count))?;
+                Ok(None)
+            }
+            UnrealCommand::Frame(idx) => {
+                log::trace!("Frame: {idx}");
+                let idx = idx as usize - 1;
+                let frame = self.callstack.iter().nth_back(idx);
+                log::trace!("The {idx}th frame is {frame:#?}");
+                self.send_response(&UnrealResponse::Frame(frame.cloned()))?;
                 Ok(None)
             }
         }
@@ -255,17 +273,36 @@ where
     }
 
     /// Add a frame to the callstack.
-    pub fn add_frame(&mut self, class_name: *const c_char, line: i32) -> () {
+    pub fn add_frame(&mut self, class_name: *const c_char) -> () {
+        // The "name" provided by Unreal is of the form 'Function ClassName:FunctionName'.
+        //
+        let name = self.decode_string(class_name);
+        let mut it = name.split(&[' ', ':']);
+        it.next();
+        let class_name = it.next().unwrap_or("");
+        let function_name = it.next().unwrap_or("");
+
+        // Create the new frame data. We don't know if this will be the last callstack
+        // entry or not, and the current line number is for the last entry. Set it
+        // pre-emptively, and we'll clear it if and when we get another entry.
         let frame = Frame {
-            class_name: self.decode_string(class_name),
-            line,
+            class_name: class_name.to_string(),
+            function_name: function_name.to_string(),
+            line: self.current_line,
         };
+
+        // If we previously added an entry clear the line since it wasn't the top-most
+        // entry.
+        if !self.callstack.is_empty() {
+            let last = self.callstack.len() - 1;
+            // TODO Fixme
+            self.callstack[last].line = 66;
+        }
         self.callstack.push(frame);
     }
 
     /// Send the current call stack (or subset of it) to the adapter.
     pub fn handle_stacktrace_request(&mut self, req: &StackTraceRequest) -> StackTraceResponse {
-
         let start = req.start_frame as usize;
         let levels = req.levels as usize;
 
@@ -274,15 +311,34 @@ where
         // than requested, and possible an empty vector if no frames are available at
         // all with the given bounds.
         //
-        // Note that the start position is 0-indexed.
-        StackTraceResponse{ frames: 
-                self
-                    .callstack
-                    .iter()
-                    .skip(start)
-                    .take(levels)
-                    .map(|e| e.clone())
-                    .collect()}
+        // Note: The start position is 0-indexed.
+        // Note: Unreal gives us stack frames starting from the bottom-most up to the
+        // top-most, so this is the order they appear in the vector. DAP clients tend
+        // to ask for stack frames starting from the top-most down to the bottom-most.
+        // So, reverse the frame list when we return the response.
+        StackTraceResponse {
+            frames: self
+                .callstack
+                .iter()
+                .rev()
+                .skip(start)
+                .take(levels)
+                .map(|e| e.clone())
+                .collect(),
+        }
+    }
+
+    pub fn watch_count(&mut self, kind: WatchKind) -> i32 {
+        let iter = match kind {
+            WatchKind::Local => self.local_watches.iter(),
+            WatchKind::Global => self.global_watches.iter(),
+            WatchKind::User => self.user_watches.iter(),
+        };
+
+        iter.filter(|x| x.parent == -1)
+            .count()
+            .try_into()
+            .unwrap_or(i32::MAX)
     }
 
     /// Record the current object name. This is updated each time unreal stops.
@@ -303,6 +359,11 @@ where
         } else {
             log::trace!("Skipping log entry: not connected.");
         }
+    }
+
+    /// Set the current line.
+    pub fn goto_line(&mut self, line: i32) -> () {
+        self.current_line = line;
     }
 
     /// Decode an Unreal-encoded string to UTF-8.
@@ -544,52 +605,213 @@ mod tests {
     }
 
     #[test]
+    fn add_frame() {
+        let mut dbg = Debugger::<MockStream>::new();
+        dbg.add_frame("Function MyPackage.Class:MyFunction\0".as_ptr() as *const i8);
+        assert_eq!(dbg.callstack[0].class_name, "MyPackage.Class");
+        assert_eq!(dbg.callstack[0].function_name, "MyFunction");
+    }
+
+    #[test]
     fn empty_stacktrace() {
         let mut dbg = Debugger::<MockStream>::new();
-        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 0, levels: 20});
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest {
+            start_frame: 0,
+            levels: 20,
+        });
         assert!(response.frames.is_empty())
     }
 
     #[test]
     fn with_stacktrace() {
         let mut dbg = Debugger::<MockStream>::new();
-        dbg.callstack.push(Frame{ class_name: "Class1".to_string(), line: 20 });
-        dbg.callstack.push(Frame{ class_name: "Class2".to_string(), line: 84 });
-        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 0, levels: 20});
-        assert!(response.frames.iter().eq( vec![
-            Frame{ class_name: "Class1".to_string(), line: 20},
-            Frame{ class_name: "Class2".to_string(), line: 84},
-        ].iter()));
+        dbg.callstack.push(Frame {
+            class_name: "Class1".to_string(),
+            function_name: "foo".to_string(),
+            line: 20,
+        });
+        dbg.callstack.push(Frame {
+            class_name: "Class2".to_string(),
+            function_name: "bar".to_string(),
+            line: 84,
+        });
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest {
+            start_frame: 0,
+            levels: 20,
+        });
+        assert_eq!(
+            response.frames,
+            vec![
+                Frame {
+                    class_name: "Class2".to_string(),
+                    function_name: "bar".to_string(),
+                    line: 84
+                },
+                Frame {
+                    class_name: "Class1".to_string(),
+                    function_name: "foo".to_string(),
+                    line: 20
+                },
+            ]
+        );
     }
 
     #[test]
     fn partial_stacktrace_start() {
         let mut dbg = Debugger::<MockStream>::new();
-        dbg.callstack.push(Frame{ class_name: "Class1".to_string(), line: 20 });
-        dbg.callstack.push(Frame{ class_name: "Class2".to_string(), line: 84 });
-        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 0, levels: 1});
-        assert!(response.frames.iter().eq( vec![
-            Frame{ class_name: "Class1".to_string(), line: 20},
-        ].iter()));
+        dbg.callstack.push(Frame {
+            class_name: "Class1".to_string(),
+            function_name: "foo".to_string(),
+            line: 20,
+        });
+        dbg.callstack.push(Frame {
+            class_name: "Class2".to_string(),
+            function_name: "bar".to_string(),
+            line: 84,
+        });
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest {
+            start_frame: 0,
+            levels: 1,
+        });
+        assert_eq!(
+            response.frames,
+            vec![Frame {
+                class_name: "Class2".to_string(),
+                function_name: "bar".to_string(),
+                line: 84
+            },]
+        );
     }
-    
+
     #[test]
     fn partial_stacktrace_end() {
         let mut dbg = Debugger::<MockStream>::new();
-        dbg.callstack.push(Frame{ class_name: "Class1".to_string(), line: 20 });
-        dbg.callstack.push(Frame{ class_name: "Class2".to_string(), line: 84 });
-        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 1, levels: 1});
-        assert!(response.frames.iter().eq( vec![
-            Frame{ class_name: "Class2".to_string(), line: 84},
-        ].iter()));
+        dbg.callstack.push(Frame {
+            class_name: "Class1".to_string(),
+            function_name: "foo".to_string(),
+            line: 20,
+        });
+        dbg.callstack.push(Frame {
+            class_name: "Class2".to_string(),
+            function_name: "bar".to_string(),
+            line: 84,
+        });
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest {
+            start_frame: 1,
+            levels: 1,
+        });
+        assert_eq!(
+            response.frames,
+            vec![Frame {
+                class_name: "Class1".to_string(),
+                function_name: "foo".to_string(),
+                line: 20
+            },]
+        );
     }
 
     #[test]
     fn partial_stacktrace_beyond() {
         let mut dbg = Debugger::<MockStream>::new();
-        dbg.callstack.push(Frame{ class_name: "Class1".to_string(), line: 20 });
-        dbg.callstack.push(Frame{ class_name: "Class2".to_string(), line: 84 });
-        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 2, levels: 1});
+        dbg.callstack.push(Frame {
+            class_name: "Class1".to_string(),
+            function_name: "foo".to_string(),
+            line: 20,
+        });
+        dbg.callstack.push(Frame {
+            class_name: "Class2".to_string(),
+            function_name: "bar".to_string(),
+            line: 84,
+        });
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest {
+            start_frame: 2,
+            levels: 1,
+        });
         assert!(response.frames.is_empty());
+    }
+
+    #[test]
+    fn empty_watch_count() {
+        let mut dbg = Debugger::<MockStream>::new();
+        assert_eq!(dbg.watch_count(WatchKind::Local), 0);
+        assert_eq!(dbg.watch_count(WatchKind::Global), 0);
+        assert_eq!(dbg.watch_count(WatchKind::User), 0);
+    }
+
+    #[test]
+    fn local_watch_count() {
+        let mut dbg = Debugger::<MockStream>::new();
+        dbg.add_watch(
+            WatchKind::Local,
+            -1,
+            "Var1\0".as_ptr() as *const i8,
+            "0\0".as_ptr() as *const i8,
+        );
+        dbg.add_watch(
+            WatchKind::Local,
+            -1,
+            "Var2\0".as_ptr() as *const i8,
+            "0\0".as_ptr() as *const i8,
+        );
+        assert_eq!(dbg.watch_count(WatchKind::Local), 2);
+        assert_eq!(dbg.watch_count(WatchKind::Local), 2);
+        assert_eq!(dbg.watch_count(WatchKind::Global), 0);
+        assert_eq!(dbg.watch_count(WatchKind::User), 0);
+    }
+
+    #[test]
+    fn global_watch_count() {
+        let mut dbg = Debugger::<MockStream>::new();
+        dbg.add_watch(
+            WatchKind::Global,
+            -1,
+            "Var1\0".as_ptr() as *const i8,
+            "0\0".as_ptr() as *const i8,
+        );
+        dbg.add_watch(
+            WatchKind::Global,
+            -1,
+            "Var2\0".as_ptr() as *const i8,
+            "0\0".as_ptr() as *const i8,
+        );
+        assert_eq!(dbg.watch_count(WatchKind::Local), 0);
+        assert_eq!(dbg.watch_count(WatchKind::Global), 2);
+        assert_eq!(dbg.watch_count(WatchKind::User), 0);
+    }
+
+    #[test]
+    fn watch_counts_roots_only() {
+        let mut dbg = Debugger::<MockStream>::new();
+        dbg.add_watch(
+            WatchKind::Global,
+            -1,
+            "Var1\0".as_ptr() as *const i8,
+            "0\0".as_ptr() as *const i8,
+        );
+        dbg.add_watch(
+            WatchKind::Global,
+            0,
+            "subfield\0".as_ptr() as *const i8,
+            "0\0".as_ptr() as *const i8,
+        );
+        dbg.add_watch(
+            WatchKind::Global,
+            0,
+            "subfield2\0".as_ptr() as *const i8,
+            "0\0".as_ptr() as *const i8,
+        );
+        dbg.add_watch(
+            WatchKind::Global,
+            -1,
+            "Var2\0".as_ptr() as *const i8,
+            "0\0".as_ptr() as *const i8,
+        );
+        dbg.add_watch(
+            WatchKind::Global,
+            3,
+            "subfield\0".as_ptr() as *const i8,
+            "0\0".as_ptr() as *const i8,
+        );
+        assert_eq!(dbg.watch_count(WatchKind::Global), 2);
     }
 }

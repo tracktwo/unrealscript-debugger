@@ -3,22 +3,28 @@ mod comm;
 use std::{
     collections::BTreeMap,
     net::TcpStream,
+    num::TryFromIntError,
     path::{Component, Path},
-    thread::JoinHandle, num::TryFromIntError,
+    thread::JoinHandle,
 };
 
 use dap::{
-    events::{EventSend, OutputEventBody, StoppedEventBody, ExitedEventBody},
+    events::{EventSend, ExitedEventBody, OutputEventBody, StoppedEventBody},
     prelude::*,
-    requests::{AttachRequestArguments, InitializeArguments, SetBreakpointsArguments, StackTraceArguments},
+    requests::{
+        AttachRequestArguments, InitializeArguments, ScopesArguments, SetBreakpointsArguments,
+        StackTraceArguments,
+    },
     responses::ErrorMessage,
-    types::{Capabilities, OutputEventCategory, Source, Thread, StoppedEventReason, StackFrame},
+    types::{
+        Capabilities, OutputEventCategory, Scope, Source, StackFrame, StoppedEventReason, Thread,
+    },
 };
 use serde_json::{de::IoRead, Deserializer, Value};
 use std::fmt::Debug;
 use thiserror::Error;
 
-use common::{Breakpoint, UnrealEvent, DEFAULT_PORT, StackTraceRequest};
+use common::{Breakpoint, StackTraceRequest, UnrealEvent, WatchKind, DEFAULT_PORT};
 
 use comm::{ChannelError, UnrealChannel};
 
@@ -118,10 +124,12 @@ impl Adapter for UnrealscriptAdapter {
                 return Ok(Response::make_ack(&request).expect("disconnect can be acked"))
             }
             Command::StackTrace(args) => self.stack_trace(args),
+            Command::Scopes(args) => self.scopes(args),
             cmd => {
                 log::error!("Unhandled command: {cmd:#?}");
                 Err(UnrealscriptAdapterError::UnhandledCommandError(
-                request.command.name().to_string(),))
+                    request.command.name().to_string(),
+                ))
             }
         };
 
@@ -221,10 +229,7 @@ impl UnrealscriptAdapter {
                         line: Some(
                             (new_bp.line + if self.one_based_lines { 0 } else { -1 }).into(),
                         ),
-                        source: Some(Source {
-                            path: Some(path.to_string()),
-                            ..Default::default()
-                        }),
+                        source: Some(class_info.into()),
                         ..Default::default()
                     });
                 }
@@ -286,8 +291,11 @@ impl UnrealscriptAdapter {
         // Now that we're connected we can tell the client that we're ready to receive breakpoint
         // info, etc. Send the 'initialized' event.
         ctx.send_event(Event {
-            body: events::EventBody::Initialized
-        }).or(Err(UnrealscriptAdapterError::CommunicationError(ChannelError::ConnectionError)))?;
+            body: events::EventBody::Initialized,
+        })
+        .or(Err(UnrealscriptAdapterError::CommunicationError(
+            ChannelError::ConnectionError,
+        )))?;
 
         Ok(ResponseBody::Attach)
     }
@@ -295,15 +303,21 @@ impl UnrealscriptAdapter {
     /// Fetch the stack from the interface and send it to the client.
     fn stack_trace(
         &mut self,
-        args: &StackTraceArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        args: &StackTraceArguments,
+    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        let start_frame =
+            args.start_frame
+                .unwrap_or(0)
+                .try_into()
+                .or_else(|e: TryFromIntError| {
+                    Err(UnrealscriptAdapterError::LimitExceeded(e.to_string()))
+                })?;
 
-        let start_frame = args
-            .start_frame
+        let levels = args
+            .levels
             .unwrap_or(0)
-            .try_into().or_else(|e: TryFromIntError| 
-                Err(UnrealscriptAdapterError::LimitExceeded(e.to_string())))?;
-
-        let levels = args.levels.unwrap_or(0).try_into().map_err(|e:TryFromIntError| UnrealscriptAdapterError::LimitExceeded(e.to_string()))?;
+            .try_into()
+            .map_err(|e: TryFromIntError| UnrealscriptAdapterError::LimitExceeded(e.to_string()))?;
 
         log::info!("Stack trace request for {levels} frames starting at {start_frame}");
 
@@ -311,24 +325,125 @@ impl UnrealscriptAdapter {
             return Err(UnrealscriptAdapterError::NotConnected);
         }
 
-        let response = self.channel.as_mut().unwrap().stack_trace(StackTraceRequest{ start_frame, levels })?;
-        Ok(ResponseBody::StackTrace(dap::responses::StackTraceResponse{
-            stack_frames: response.frames.into_iter().enumerate().map(|(i, f)| 
-                StackFrame{
-                    // We'll use the index into the stack frame vector as the id, offset by 1.
-                    id: i as i64 + 1,
-                    name: f.class_name,
-                    source: None,
-                    line: 0,
-                    column: 0,
-                    end_line: None,
-                    end_column: None,
-                    can_restart: None,
-                    instruction_pointer_reference: None,
-                    module_id: None,
-                    presentation_hint: None,
-                }).collect(),
-            total_frames: None
+        let response = self
+            .channel
+            .as_mut()
+            .unwrap()
+            .stack_trace(StackTraceRequest {
+                start_frame,
+                levels,
+            })?;
+        Ok(ResponseBody::StackTrace(
+            dap::responses::StackTraceResponse {
+                stack_frames: response
+                    .frames
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let canonical_name = f.class_name.to_uppercase();
+                        let mut source: Option<Source> = None;
+
+                        // TODO Handle source files we haven't seen in our map yet.
+                        if let Some(entry) = self.class_map.get(&canonical_name) {
+                            source = Some(Source {
+                                name: Some(entry.qualify()),
+                                path: Some(entry.file_name.clone()),
+                                source_reference: None,
+                                presentation_hint: None,
+                                origin: None,
+                                sources: None,
+                                adapter_data: None,
+                                checksums: None,
+                            });
+                        }
+                        StackFrame {
+                            // We'll use the index into the stack frame vector as the id, offset by 1.
+                            id: i as i64 + 1 + start_frame as i64,
+                            name: f.class_name,
+                            source,
+                            line: f.line as i64,
+                            column: 0,
+                            end_line: None,
+                            end_column: None,
+                            can_restart: None,
+                            instruction_pointer_reference: None,
+                            module_id: None,
+                            presentation_hint: None,
+                        }
+                    })
+                    .collect(),
+                total_frames: None,
+            },
+        ))
+    }
+
+    // Returns the source corresponding to a given frame index, or None if we can't find it.
+    fn source_for_frame(&mut self, idx: i32) -> Result<Option<Source>, UnrealscriptAdapterError> {
+        if let Some(frame) = self.channel.as_mut().unwrap().frame(idx)? {
+            let canonical = frame.class_name.to_uppercase();
+            if let Some(info) = self.class_map.get(&canonical) {
+                return Ok(Some(info.into()));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Return the scopes available in this suspended state. Unreal only supports two scopes: Local
+    /// and Global (the third watch kind for user watches is handled by DAP and we don't need
+    /// native support for it).
+    fn scopes(&mut self, args: &ScopesArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        let globals_ref = args.frame_id << 1;
+        let locals_ref = args.frame_id << 1 + 1;
+
+        if self.channel.is_none() {
+            return Err(UnrealscriptAdapterError::NotConnected);
+        }
+
+        let source = self.source_for_frame(args.frame_id as i32)?;
+        // For the top-most frame (1) only, fetch all the watch data from the debugger.
+        let local_vars = if args.frame_id == 1 {
+            Some(
+                self.channel
+                    .as_mut()
+                    .unwrap()
+                    .watch_count(WatchKind::Local)?
+                    .into(),
+            )
+        } else {
+            None
+        };
+
+        let global_vars = if args.frame_id == 1 {
+            Some(
+                self.channel
+                    .as_mut()
+                    .unwrap()
+                    .watch_count(WatchKind::Global)?
+                    .into(),
+            )
+        } else {
+            None
+        };
+        Ok(ResponseBody::Scopes(responses::ScopesResponse {
+            scopes: vec![
+                Scope {
+                    name: "Globals".to_string(),
+                    variables_reference: globals_ref,
+                    named_variables: global_vars,
+                    expensive: args.frame_id != 1,
+                    source: source.clone(),
+                    ..Default::default()
+                },
+                Scope {
+                    name: "Locals".to_string(),
+                    variables_reference: locals_ref,
+                    named_variables: local_vars,
+                    expensive: args.frame_id != 1,
+                    source,
+                    ..Default::default()
+                },
+            ],
         }))
     }
 }
@@ -347,49 +462,46 @@ impl UnrealscriptAdapter {
 /// likely indicates a fatal error in the interface: if the debugger is stopped gracefully from the
 /// Unreal side we expect to receive a Disconnect event first. In this case we will send an
 /// 'exited' event with a non-zero code before returning.
-fn event_loop(
-    sender: Box<dyn EventSend>,
-    receiver: Deserializer<IoRead<TcpStream>>,
-) -> () {
+fn event_loop(sender: Box<dyn EventSend>, receiver: Deserializer<IoRead<TcpStream>>) -> () {
     for evt in receiver.into_iter::<UnrealEvent>() {
         let res = match evt {
-            Ok(UnrealEvent::Log(msg)) => {
-                sender
-                    .send_event(events::Event {
-                        body: events::EventBody::Output(OutputEventBody {
-                            category: Some(OutputEventCategory::Stdout),
-                            output: msg,
-                            ..Default::default()
-                        }),
-                    })
-            }
-            Ok(UnrealEvent::Stopped) => 
-                sender
-                .send_event(events::Event {
-                        body: events::EventBody::Stopped(StoppedEventBody {
-                            reason: StoppedEventReason::Breakpoint,
-                            thread_id: Some(UNREAL_THREAD_ID),
-                            description: None,
-                            preserve_focus_hint: None,
-                            text: None,
-                            all_threads_stopped: None,
-                            hit_breakpoint_ids: None,
-                        })
-                    }),
+            Ok(UnrealEvent::Log(msg)) => sender.send_event(events::Event {
+                body: events::EventBody::Output(OutputEventBody {
+                    category: Some(OutputEventCategory::Stdout),
+                    output: msg,
+                    ..Default::default()
+                }),
+            }),
+            Ok(UnrealEvent::Stopped) => sender.send_event(events::Event {
+                body: events::EventBody::Stopped(StoppedEventBody {
+                    reason: StoppedEventReason::Breakpoint,
+                    thread_id: Some(UNREAL_THREAD_ID),
+                    description: None,
+                    preserve_focus_hint: None,
+                    text: None,
+                    all_threads_stopped: None,
+                    hit_breakpoint_ids: None,
+                }),
+            }),
             Ok(UnrealEvent::Disconnect) => {
                 log::info!("Received disconnect event from Unreal. Closing down the event loop");
 
                 // It's fine if we fail to send this event, in that case the adapter is already
                 // closing down too.
-                sender.send_event(events::Event {
-                    body: events::EventBody::Terminated(None) }).ok();
+                sender
+                    .send_event(events::Event {
+                        body: events::EventBody::Terminated(None),
+                    })
+                    .ok();
                 return;
             }
 
             Err(e) => {
-                log::error!("Deserialization error receiving event from the debugger interface: {e}");
+                log::error!(
+                    "Deserialization error receiving event from the debugger interface: {e}"
+                );
                 continue;
-            },
+            }
         };
 
         // If sending the event through the sender returned an error that can only indicate that
@@ -405,8 +517,13 @@ fn event_loop(
     // Send the adapter an "Exited" event with a non-zero exit code to indicate this and then
     // stop. Again if this fails to send because the adapter is closing down too then we can just
     // ignore the error.
-    sender.send_event(events::Event {
-        body: events::EventBody::Exited(ExitedEventBody{exit_code: UNREAL_UNEXPECTED_EXIT_CODE})}).ok();
+    sender
+        .send_event(events::Event {
+            body: events::EventBody::Exited(ExitedEventBody {
+                exit_code: UNREAL_UNEXPECTED_EXIT_CODE,
+            }),
+        })
+        .ok();
 }
 
 /// Information about a class.
@@ -439,6 +556,25 @@ impl ClassInfo {
     }
 }
 
+impl From<&mut ClassInfo> for Source {
+    fn from(value: &mut ClassInfo) -> Self {
+        Source {
+            name: Some(value.qualify()),
+            path: Some(value.file_name.clone()),
+            ..Default::default()
+        }
+    }
+}
+
+impl From<&ClassInfo> for Source {
+    fn from(value: &ClassInfo) -> Self {
+        Source {
+            name: Some(value.qualify()),
+            path: Some(value.file_name.clone()),
+            ..Default::default()
+        }
+    }
+}
 /// Process a Source entry to obtain information about a class.
 ///
 /// For Unrealscript the details of a class can be determined from its source file.
@@ -483,6 +619,7 @@ pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError
 
 #[cfg(test)]
 mod tests {
+    use common::Frame;
     use dap::types::{Source, SourceBreakpoint};
 
     use super::*;
@@ -497,8 +634,19 @@ mod tests {
             Ok(bp)
         }
 
-        fn stack_trace(&mut self, _stack: common::StackTraceRequest) -> Result<common::StackTraceResponse, ChannelError> {
-            Ok(common::StackTraceResponse{ frames: vec![] })
+        fn stack_trace(
+            &mut self,
+            _stack: common::StackTraceRequest,
+        ) -> Result<common::StackTraceResponse, ChannelError> {
+            Ok(common::StackTraceResponse { frames: vec![] })
+        }
+
+        fn watch_count(&mut self, _kind: WatchKind) -> Result<i32, ChannelError> {
+            Ok(0)
+        }
+
+        fn frame(&mut self, _idx: i32) -> Result<Option<Frame>, ChannelError> {
+            Ok(None)
         }
     }
 

@@ -53,13 +53,15 @@ pub struct Watch {
 }
 
 /// A callstack frame.
-#[derive(Serialize,Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Frame {
+    pub function_name: String,
     pub class_name: String,
     pub line: i32,
 }
 
 /// The kind of watch, e.g. scope or user-defined watches.
+#[derive(Serialize, Deserialize, Debug)]
 pub enum WatchKind {
     Local,
     Global,
@@ -89,6 +91,11 @@ pub enum UnrealCommand {
     RemoveBreakpoint(Breakpoint),
     // Request the call stack - may request the full stack or only a subset.
     StackTrace(StackTraceRequest),
+    // Determine the number of watches of the given kind in the currently active
+    // frame.
+    WatchCount(WatchKind),
+    // Retreive information about a particular frame.
+    Frame(i32),
 }
 
 /// Responses that can be sent from the debugger interface to the adapter, but only
@@ -98,6 +105,8 @@ pub enum UnrealResponse {
     BreakpointAdded(Breakpoint),
     BreakpointRemoved(Breakpoint),
     StackTrace(StackTraceResponse),
+    WatchCount(i32),
+    Frame(Option<Frame>),
 }
 
 /// Events that can be sent from the interface at any time.

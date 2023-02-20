@@ -163,9 +163,10 @@ pub extern "C" fn EditorLoadClass(_class_name: *const c_char) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn EditorGotoLine(_line: i32, _highlight: i32) -> () {
-    trace!("EditorGotoLine");
-    // TODO Implement
+pub extern "C" fn EditorGotoLine(line: i32, _highlight: i32) -> () {
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.goto_line(line);
 }
 
 #[no_mangle]
@@ -189,7 +190,8 @@ pub extern "C" fn CallStackAdd(class_name: *const c_char) -> () {
     trace!("CallStackAdd");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
-    dbg.add_frame(class_name, 0);
+    // TODO: The line is not available.
+    dbg.add_frame(class_name);
 }
 
 #[no_mangle]

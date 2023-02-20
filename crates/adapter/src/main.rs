@@ -2,7 +2,7 @@ use std::io::BufReader;
 
 use adapter::UnrealscriptAdapter;
 use dap::prelude::*;
-use flexi_logger::{FileSpec, Logger, Duplicate};
+use flexi_logger::{Duplicate, FileSpec, Logger};
 
 fn main() {
     let _logger = Logger::try_with_env_or_str("trace")
