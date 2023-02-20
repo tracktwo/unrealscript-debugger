@@ -41,6 +41,9 @@ pub extern "C" fn SetCallback(callback: Option<UnrealCallback>) {
 #[no_mangle]
 pub extern "C" fn ShowDllForm() {
     trace!("ShowDllForm");
+    let mut hnd = DEBUGGER.lock().unwrap();
+    let dbg = hnd.as_mut().unwrap();
+    dbg.show_dll_form();
 }
 
 /// Add the given class to the class hierarchy.

@@ -276,6 +276,12 @@ impl UnrealscriptAdapter {
             event_loop(event_sender, event_receiver)
         }));
 
+        // Now that we're connected we can tell the client that we're ready to receive breakpoint
+        // info, etc. Send the 'initialized' event.
+        ctx.send_event(Event {
+            body: events::EventBody::Initialized
+        }).or(Err(UnrealscriptAdapterError::CommunicationError(ChannelError::ConnectionError)))?;
+
         Ok(ResponseBody::Attach)
     }
 }

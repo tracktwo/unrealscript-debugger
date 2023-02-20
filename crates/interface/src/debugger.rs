@@ -26,6 +26,8 @@ pub struct Debugger<W> {
     current_object_name: Option<String>,
     event_channel: Option<Serializer<W>>,
     response_channel: Option<Sender>,
+    saw_show_dll: bool,
+    pending_break_event: bool,
 }
 
 #[derive(Error, Debug)]
@@ -63,6 +65,8 @@ where
             current_object_name: None,
             event_channel: None,
             response_channel: None,
+            saw_show_dll: false,
+            pending_break_event: false,
         }
     }
 
@@ -109,6 +113,55 @@ where
             .send(response)
             .or(Err(DebuggerError::NotConnected))?;
         Ok(())
+    }
+
+    /// The debugger has stopped (maybe).
+    ///
+    /// Unreal will invoke `show_dll_form` as the last step when the debugger breaks after all
+    /// other state has been sent to the interface, making it a great hook to use to tell the
+    /// adapter that the debugger has stopped.
+    ///
+    /// Unfortunately Unreal *also* calls this function once during the initial startup. This
+    /// has the sequence:
+    ///
+    ///  - SetCallback
+    ///  - ClearAWatch 0
+    ///  - ClearAWatch 1
+    ///  - ClearAWatch 2
+    ///  - ShowDllForm
+    ///
+    ///  This first call to ShowDllForm does _not_ indicate that the debugger has stopped - it
+    ///  hasn't. This is never a break, even when using -autoDebug to tell the debugger to break
+    ///  on startup.
+    ///
+    ///  All true stops will send a ShowDllForm after another sequence of calls, including loading
+    ///  the editor class and line; locking, clearing, setting, and unlocking the watches; and
+    ///  clearing and setting the call stack.
+    ///
+    ///  We don't need to implement a complex state machine to track this, however, since we will
+    ///  only get this spurious ShowDllForm once during initialization, even in the -autoDebug case
+    ///  and even when the debugger is toggled off and on multiple times in a single execution of
+    ///  the game. So: just ignore the first call we see, and from then on treat any ShowDllForm
+    ///  call as a break.
+    pub fn show_dll_form(&mut self) -> () {
+        if !self.saw_show_dll {
+            // This was the first spurious call to show dll. Just remember we saw it but do
+            // nothing, this is not a break. If we did launch with -autoDebug we'll get another
+            // call after the rest of the debugger state has been sent.
+            self.saw_show_dll = true;
+        } else {
+            // This is a true break. If we're connected send the Stopped event to the adapter. If
+            // we're not connected yet set a flag indicating that we're stopped so we can tell
+            // the adapter about this state when it does connect.
+            if let Some(stream) = &mut self.event_channel {
+                if let Err(e) = UnrealEvent::Stopped.serialize(stream) {
+                    log::error!("Sending stopped event failed: {e}");
+                }
+            } else {
+                log::trace!("Skipping stopped event: not connected.");
+                self.pending_break_event = true;
+            }
+        }
     }
 
     /// Add a class to the debugger's class hierarchy.
@@ -239,6 +292,14 @@ impl Debugger<TcpStream> {
     /// events.
     pub fn new_connection(&mut self, stream: TcpStream) -> () {
         self.event_channel = Some(serde_json::Serializer::new(stream));
+
+        // The debugger stopped before we connected (e.g. due to -autoDebug). Send a stopped
+        // event to let it know about this.
+        if self.pending_break_event {
+            log::info!("Sending stored stop event to the new connection.");
+            self.pending_break_event = false;
+            self.show_dll_form();
+        }
     }
 }
 

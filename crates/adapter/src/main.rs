@@ -2,12 +2,13 @@ use std::io::BufReader;
 
 use adapter::UnrealscriptAdapter;
 use dap::prelude::*;
-use flexi_logger::{FileSpec, Logger};
+use flexi_logger::{FileSpec, Logger, Duplicate};
 
 fn main() {
     let _logger = Logger::try_with_env_or_str("trace")
         .unwrap()
         .log_to_file(FileSpec::default().directory("logs"))
+        .duplicate_to_stderr(Duplicate::All)
         .start()
         .unwrap();
 
