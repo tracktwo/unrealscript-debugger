@@ -4,21 +4,21 @@ use std::{
     collections::BTreeMap,
     net::TcpStream,
     path::{Component, Path},
-    thread::JoinHandle,
+    thread::JoinHandle, num::TryFromIntError,
 };
 
 use dap::{
     events::{EventSend, OutputEventBody, StoppedEventBody, ExitedEventBody},
     prelude::*,
-    requests::{AttachRequestArguments, InitializeArguments, SetBreakpointsArguments},
+    requests::{AttachRequestArguments, InitializeArguments, SetBreakpointsArguments, StackTraceArguments},
     responses::ErrorMessage,
-    types::{Capabilities, OutputEventCategory, Source, Thread, StoppedEventReason},
+    types::{Capabilities, OutputEventCategory, Source, Thread, StoppedEventReason, StackFrame},
 };
 use serde_json::{de::IoRead, Deserializer, Value};
 use std::fmt::Debug;
 use thiserror::Error;
 
-use common::{Breakpoint, UnrealEvent, DEFAULT_PORT};
+use common::{Breakpoint, UnrealEvent, DEFAULT_PORT, StackTraceRequest};
 
 use comm::{ChannelError, UnrealChannel};
 
@@ -62,6 +62,9 @@ pub enum UnrealscriptAdapterError {
 
     #[error("Communication error: {0}")]
     CommunicationError(ChannelError),
+
+    #[error("Limit exceeded: {0}")]
+    LimitExceeded(String),
 }
 
 impl UnrealscriptAdapterError {
@@ -73,6 +76,7 @@ impl UnrealscriptAdapterError {
             UnrealscriptAdapterError::InvalidFilename(_) => 2,
             UnrealscriptAdapterError::NotConnected => 3,
             UnrealscriptAdapterError::CommunicationError(_) => 4,
+            UnrealscriptAdapterError::LimitExceeded(_) => 5,
         }
     }
 
@@ -113,9 +117,12 @@ impl Adapter for UnrealscriptAdapter {
             Command::Disconnect(_args) => {
                 return Ok(Response::make_ack(&request).expect("disconnect can be acked"))
             }
-            _ => Err(UnrealscriptAdapterError::UnhandledCommandError(
-                request.command.name().to_string(),
-            )),
+            Command::StackTrace(args) => self.stack_trace(args),
+            cmd => {
+                log::error!("Unhandled command: {cmd:#?}");
+                Err(UnrealscriptAdapterError::UnhandledCommandError(
+                request.command.name().to_string(),))
+            }
         };
 
         match response {
@@ -284,6 +291,46 @@ impl UnrealscriptAdapter {
 
         Ok(ResponseBody::Attach)
     }
+
+    /// Fetch the stack from the interface and send it to the client.
+    fn stack_trace(
+        &mut self,
+        args: &StackTraceArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+
+        let start_frame = args
+            .start_frame
+            .unwrap_or(0)
+            .try_into().or_else(|e: TryFromIntError| 
+                Err(UnrealscriptAdapterError::LimitExceeded(e.to_string())))?;
+
+        let levels = args.levels.unwrap_or(0).try_into().map_err(|e:TryFromIntError| UnrealscriptAdapterError::LimitExceeded(e.to_string()))?;
+
+        log::info!("Stack trace request for {levels} frames starting at {start_frame}");
+
+        if self.channel.is_none() {
+            return Err(UnrealscriptAdapterError::NotConnected);
+        }
+
+        let response = self.channel.as_mut().unwrap().stack_trace(StackTraceRequest{ start_frame, levels })?;
+        Ok(ResponseBody::StackTrace(dap::responses::StackTraceResponse{
+            stack_frames: response.frames.into_iter().enumerate().map(|(i, f)| 
+                StackFrame{
+                    // We'll use the index into the stack frame vector as the id, offset by 1.
+                    id: i as i64 + 1,
+                    name: f.class_name,
+                    source: None,
+                    line: 0,
+                    column: 0,
+                    end_line: None,
+                    end_column: None,
+                    can_restart: None,
+                    instruction_pointer_reference: None,
+                    module_id: None,
+                    presentation_hint: None,
+                }).collect(),
+            total_frames: None
+        }))
+    }
 }
 
 /// The event processing loop for the adapter.
@@ -448,6 +495,10 @@ mod tests {
         }
         fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
             Ok(bp)
+        }
+
+        fn stack_trace(&mut self, _stack: common::StackTraceRequest) -> Result<common::StackTraceResponse, ChannelError> {
+            Ok(common::StackTraceResponse{ frames: vec![] })
         }
     }
 

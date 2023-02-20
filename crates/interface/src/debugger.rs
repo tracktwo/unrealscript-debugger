@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use super::UnrealCallback;
 use super::DEBUGGER;
-use common::{Breakpoint, UnrealCommand, UnrealEvent, UnrealResponse};
+use common::{Breakpoint, UnrealCommand, UnrealEvent, UnrealResponse, StackTraceResponse, StackTraceRequest};
 use common::{Frame, Watch, WatchKind, DEFAULT_PORT};
 
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
@@ -100,6 +100,16 @@ where
                 let str = format!("removebreakpoint {} {}", bp.qualified_name, bp.line);
                 log::trace!("handle_command: {str}");
                 Ok(Some(self.encode_string(&str)))
+            }
+            UnrealCommand::StackTrace(stack) => {
+                // A stack trace request can be handled without talking to unreal: we
+                // just return the current call stack state.
+                let response = self.handle_stacktrace_request(&stack);
+                self.send_response(&UnrealResponse::StackTrace(response))?;
+                
+                // This request has been completely handled, no need for the caller to invoke the
+                // callback.
+                Ok(None)
             }
         }
     }
@@ -251,6 +261,28 @@ where
             line,
         };
         self.callstack.push(frame);
+    }
+
+    /// Send the current call stack (or subset of it) to the adapter.
+    pub fn handle_stacktrace_request(&mut self, req: &StackTraceRequest) -> StackTraceResponse {
+
+        let start = req.start_frame as usize;
+        let levels = req.levels as usize;
+
+        // Return some subset of the frames starting from the indicated start position
+        // with at most levels elements. This may return a smaller vector of frames
+        // than requested, and possible an empty vector if no frames are available at
+        // all with the given bounds.
+        //
+        // Note that the start position is 0-indexed.
+        StackTraceResponse{ frames: 
+                self
+                    .callstack
+                    .iter()
+                    .skip(start)
+                    .take(levels)
+                    .map(|e| e.clone())
+                    .collect()}
     }
 
     /// Record the current object name. This is updated each time unreal stops.
@@ -509,5 +541,55 @@ mod tests {
             UnrealEvent::Log(s) => assert_eq!(str[..str.len() - 1], s[..s.len() - 2]),
             _ => panic!("Expected a log"),
         };
+    }
+
+    #[test]
+    fn empty_stacktrace() {
+        let mut dbg = Debugger::<MockStream>::new();
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 0, levels: 20});
+        assert!(response.frames.is_empty())
+    }
+
+    #[test]
+    fn with_stacktrace() {
+        let mut dbg = Debugger::<MockStream>::new();
+        dbg.callstack.push(Frame{ class_name: "Class1".to_string(), line: 20 });
+        dbg.callstack.push(Frame{ class_name: "Class2".to_string(), line: 84 });
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 0, levels: 20});
+        assert!(response.frames.iter().eq( vec![
+            Frame{ class_name: "Class1".to_string(), line: 20},
+            Frame{ class_name: "Class2".to_string(), line: 84},
+        ].iter()));
+    }
+
+    #[test]
+    fn partial_stacktrace_start() {
+        let mut dbg = Debugger::<MockStream>::new();
+        dbg.callstack.push(Frame{ class_name: "Class1".to_string(), line: 20 });
+        dbg.callstack.push(Frame{ class_name: "Class2".to_string(), line: 84 });
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 0, levels: 1});
+        assert!(response.frames.iter().eq( vec![
+            Frame{ class_name: "Class1".to_string(), line: 20},
+        ].iter()));
+    }
+    
+    #[test]
+    fn partial_stacktrace_end() {
+        let mut dbg = Debugger::<MockStream>::new();
+        dbg.callstack.push(Frame{ class_name: "Class1".to_string(), line: 20 });
+        dbg.callstack.push(Frame{ class_name: "Class2".to_string(), line: 84 });
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 1, levels: 1});
+        assert!(response.frames.iter().eq( vec![
+            Frame{ class_name: "Class2".to_string(), line: 84},
+        ].iter()));
+    }
+
+    #[test]
+    fn partial_stacktrace_beyond() {
+        let mut dbg = Debugger::<MockStream>::new();
+        dbg.callstack.push(Frame{ class_name: "Class1".to_string(), line: 20 });
+        dbg.callstack.push(Frame{ class_name: "Class2".to_string(), line: 84 });
+        let response = dbg.handle_stacktrace_request(&StackTraceRequest{start_frame: 2, levels: 1});
+        assert!(response.frames.is_empty());
     }
 }

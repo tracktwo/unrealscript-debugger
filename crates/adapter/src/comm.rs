@@ -1,6 +1,6 @@
 use std::{net::TcpStream, time::Duration};
 
-use common::{Breakpoint, UnrealCommand, UnrealResponse};
+use common::{Breakpoint, UnrealCommand, UnrealResponse, StackTraceRequest, StackTraceResponse};
 use ipmpsc::{Receiver, SharedRingBuffer};
 use serde::Serialize;
 use serde_json::{de::IoRead, Deserializer, Serializer};
@@ -42,6 +42,8 @@ pub trait UnrealChannel: Send + 'static {
 
     // Remove a breakpoint, receiving the removed breakpoint from unreal.
     fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError>;
+
+    fn stack_trace(&mut self, stack: StackTraceRequest) -> Result<StackTraceResponse, ChannelError>;
 }
 
 /// The DefaultChannel uses two communications modes for talking to the debugger interface.
@@ -71,19 +73,32 @@ const SHARED_MEMORY_SIZE: u32 = 1024 * 1024 * 16;
 /// The timeout for receiving responses from the adapter
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
+impl DefaultChannel {
+
+    /// Fetch the next response from the channel.
+    ///
+    /// ### Errors:
+    ///   Returns a ChannelError::ConnectionError if the message channel encounters an error.
+    ///   Returns a ChannelError::Timeout if a message does not appear in a reasonable time.
+    fn next_response(&mut self) -> Result<UnrealResponse, ChannelError> {
+        self
+            .response_receiver
+            .recv_timeout(DEFAULT_TIMEOUT)
+            .or(Err(ChannelError::ConnectionError))?
+            .ok_or(ChannelError::Timeout)
+    }
+}
 impl UnrealChannel for DefaultChannel {
+
     fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
         // Send the breakpoint to the interface
         UnrealCommand::AddBreakpoint(bp).serialize(&mut self.sender)?;
 
         // This should result in exactly one breakpoint response from the interface.
-        let response = self
-            .response_receiver
-            .recv_timeout(DEFAULT_TIMEOUT)
-            .or(Err(ChannelError::ConnectionError))?;
-        match response {
-            Some(UnrealResponse::BreakpointAdded(bp)) => Ok(bp),
-            _ => Err(ChannelError::ProtocolError),
+        match self.next_response() {
+            Ok(UnrealResponse::BreakpointAdded(bp)) => Ok(bp),
+            Ok(_) => Err(ChannelError::ProtocolError),
+            Err(e) => Err(e),
         }
     }
 
@@ -92,13 +107,21 @@ impl UnrealChannel for DefaultChannel {
         UnrealCommand::RemoveBreakpoint(bp).serialize(&mut self.sender)?;
 
         // This should result in exactly one breakpoint response from the interface.
-        let response = self
-            .response_receiver
-            .recv_timeout(DEFAULT_TIMEOUT)
-            .or(Err(ChannelError::ConnectionError))?;
-        match response {
-            Some(UnrealResponse::BreakpointRemoved(bp)) => Ok(bp),
-            _ => Err(ChannelError::ProtocolError),
+        match self.next_response() {
+            Ok(UnrealResponse::BreakpointRemoved(bp)) => Ok(bp),
+            Ok(_) => Err(ChannelError::ProtocolError),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Send a stack trace request across the channel and read the resulting stack frames.
+    fn stack_trace(&mut self, req: StackTraceRequest) -> Result<StackTraceResponse, ChannelError> {
+        UnrealCommand::StackTrace(req).serialize(&mut self.sender)?;
+
+        match self.next_response() {
+            Ok(UnrealResponse::StackTrace(stack)) => Ok(stack),
+            Ok(_) => Err(ChannelError::ProtocolError),
+            Err(e) => Err(e)
         }
     }
 }

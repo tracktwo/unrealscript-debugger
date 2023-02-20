@@ -34,6 +34,17 @@ impl Breakpoint {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct StackTraceRequest {
+    pub start_frame: u32,
+    pub levels: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct StackTraceResponse {
+    pub frames: Vec<Frame>,
+}
+
 /// A variable watch.
 pub struct Watch {
     pub parent: i32,
@@ -42,6 +53,7 @@ pub struct Watch {
 }
 
 /// A callstack frame.
+#[derive(Serialize,Deserialize, Clone, Debug, PartialEq)]
 pub struct Frame {
     pub class_name: String,
     pub line: i32,
@@ -75,6 +87,8 @@ pub enum UnrealCommand {
     AddBreakpoint(Breakpoint),
     /// Remove a breakpoint
     RemoveBreakpoint(Breakpoint),
+    // Request the call stack - may request the full stack or only a subset.
+    StackTrace(StackTraceRequest),
 }
 
 /// Responses that can be sent from the debugger interface to the adapter, but only
@@ -83,6 +97,7 @@ pub enum UnrealCommand {
 pub enum UnrealResponse {
     BreakpointAdded(Breakpoint),
     BreakpointRemoved(Breakpoint),
+    StackTrace(StackTraceResponse),
 }
 
 /// Events that can be sent from the interface at any time.
