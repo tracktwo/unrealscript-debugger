@@ -229,7 +229,7 @@ impl UnrealscriptAdapter {
                         line: Some(
                             (new_bp.line + if self.one_based_lines { 0 } else { -1 }).into(),
                         ),
-                        source: Some(class_info.into()),
+                        source: Some(class_info.to_source()),
                         ..Default::default()
                     });
                 }
@@ -382,7 +382,7 @@ impl UnrealscriptAdapter {
         if let Some(frame) = self.channel.as_mut().unwrap().frame(idx)? {
             let canonical = frame.class_name.to_uppercase();
             if let Some(info) = self.class_map.get(&canonical) {
-                return Ok(Some(info.into()));
+                return Ok(Some(info.to_source()));
             }
         }
 
@@ -554,27 +554,16 @@ impl ClassInfo {
     pub fn qualify(&self) -> String {
         format!("{}.{}", self.package_name, self.class_name)
     }
-}
 
-impl From<&mut ClassInfo> for Source {
-    fn from(value: &mut ClassInfo) -> Self {
+    pub fn to_source(&self) -> Source {
         Source {
-            name: Some(value.qualify()),
-            path: Some(value.file_name.clone()),
+            name: Some(self.qualify()),
+            path: Some(self.file_name.clone()),
             ..Default::default()
         }
     }
 }
 
-impl From<&ClassInfo> for Source {
-    fn from(value: &ClassInfo) -> Self {
-        Source {
-            name: Some(value.qualify()),
-            path: Some(value.file_name.clone()),
-            ..Default::default()
-        }
-    }
-}
 /// Process a Source entry to obtain information about a class.
 ///
 /// For Unrealscript the details of a class can be determined from its source file.
