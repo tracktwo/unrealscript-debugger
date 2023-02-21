@@ -74,14 +74,14 @@ impl VariableReference {
     /// Encode a variable reference to an i64 for DAP.
     pub fn to_int(&self) -> i64 {
         let mut v: i64 = 0;
+        v.set_bits(0..=31, self.variable.into());
+        v.set_bits(32..=55, self.frame.into());
         match self.kind {
             WatchKind::Local => v.set_bits(56..63, 0),
             WatchKind::Global => v.set_bits(56..63, 1),
             WatchKind::User => v.set_bits(56..63, 2),
         };
 
-        v.set_bits(32..55, self.frame.into());
-        v.set_bits(0..31, self.variable.into());
         v
     }
 }
@@ -89,7 +89,6 @@ impl VariableReference {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn local_watch() {
         let v = VariableReference::new(WatchKind::Local, 1, 0);
