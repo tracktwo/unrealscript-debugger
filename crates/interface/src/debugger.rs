@@ -329,13 +329,13 @@ where
     }
 
     pub fn watch_count(&mut self, kind: WatchKind) -> i32 {
-        let iter = match kind {
-            WatchKind::Local => self.local_watches.iter(),
-            WatchKind::Global => self.global_watches.iter(),
-            WatchKind::User => self.user_watches.iter(),
+        let vec = match kind {
+            WatchKind::Local => &self.local_watches,
+            WatchKind::Global => &self.global_watches,
+            WatchKind::User => &self.user_watches,
         };
 
-        iter.filter(|x| x.parent == -1)
+        vec.iter().filter(|x| x.parent == -1)
             .count()
             .try_into()
             .unwrap_or(i32::MAX)
