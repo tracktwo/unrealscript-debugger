@@ -1,5 +1,7 @@
 mod comm;
 
+pub mod variable_reference;
+
 use std::{
     collections::BTreeMap,
     net::TcpStream,
@@ -13,7 +15,7 @@ use dap::{
     prelude::*,
     requests::{
         AttachRequestArguments, InitializeArguments, ScopesArguments, SetBreakpointsArguments,
-        StackTraceArguments,
+        StackTraceArguments, VariablesArguments,
     },
     responses::ErrorMessage,
     types::{
@@ -131,6 +133,7 @@ impl Adapter for UnrealscriptAdapter {
                     request.command.name().to_string(),
                 ))
             }
+            Command::Variables(args) => self.variables(args),
         };
 
         match response {
@@ -400,7 +403,6 @@ impl UnrealscriptAdapter {
             return Err(UnrealscriptAdapterError::NotConnected);
         }
 
-        let source = self.source_for_frame(args.frame_id as i32)?;
         // For the top-most frame (1) only, fetch all the watch data from the debugger.
         let local_vars = if args.frame_id == 1 {
             Some(
@@ -425,6 +427,7 @@ impl UnrealscriptAdapter {
         } else {
             None
         };
+
         Ok(ResponseBody::Scopes(responses::ScopesResponse {
             scopes: vec![
                 Scope {
@@ -432,7 +435,6 @@ impl UnrealscriptAdapter {
                     variables_reference: globals_ref,
                     named_variables: global_vars,
                     expensive: args.frame_id != 1,
-                    source: source.clone(),
                     ..Default::default()
                 },
                 Scope {
@@ -440,11 +442,14 @@ impl UnrealscriptAdapter {
                     variables_reference: locals_ref,
                     named_variables: local_vars,
                     expensive: args.frame_id != 1,
-                    source,
                     ..Default::default()
                 },
             ],
         }))
+    }
+
+    fn variables(&mut self, args: &VariablesArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        todo!()
     }
 }
 
