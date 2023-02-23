@@ -433,16 +433,16 @@ impl UnrealscriptAdapter {
         Ok(ResponseBody::Scopes(responses::ScopesResponse {
             scopes: vec![
                 Scope {
-                    name: "Globals".to_string(),
-                    variables_reference: globals_ref.to_int(),
-                    named_variables: global_vars,
+                    name: "Locals".to_string(),
+                    variables_reference: locals_ref.to_int(),
+                    named_variables: local_vars,
                     expensive: args.frame_id != 1,
                     ..Default::default()
                 },
                 Scope {
-                    name: "Locals".to_string(),
-                    variables_reference: locals_ref.to_int(),
-                    named_variables: local_vars,
+                    name: "Globals".to_string(),
+                    variables_reference: globals_ref.to_int(),
+                    named_variables: global_vars,
                     expensive: args.frame_id != 1,
                     ..Default::default()
                 },

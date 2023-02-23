@@ -12,6 +12,11 @@ fn main() {
         .start()
         .unwrap();
 
+    // Clients don't always connect stderr to anything so hook panics and write them to the log.
+    std::panic::set_hook(Box::new(|p| {
+        log::error!("Panic: {p:#?}");
+    }));
+
     let adapter = UnrealscriptAdapter::new();
     let mut server = Server::new(adapter, std::io::stdout());
 

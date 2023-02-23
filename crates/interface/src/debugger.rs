@@ -170,9 +170,12 @@ where
 
                 let list = self.get_watches(kind);
 
+                // A count of 0 means all elements.
+                let count = if count == 0 { usize::MAX } else { count };
+
                 // Iterate the children of 'parent' according to the requested bounds and return
                 // a vector containing clones of the watches for these children.
-                let vars = list[parent]
+                let vars: Vec<Variable> = list[parent]
                     .children
                     .iter()
                     .skip(start)
@@ -383,6 +386,9 @@ where
         let start = req.start_frame as usize;
         let levels = req.levels as usize;
 
+        // A levels request of '0' means 'all levels'.
+        let levels = if levels == 0 { usize::MAX } else { levels };
+
         // Return some subset of the frames starting from the indicated start position
         // with at most levels elements. This may return a smaller vector of frames
         // than requested, and possible an empty vector if no frames are available at
@@ -474,6 +480,12 @@ pub fn initialize(cb: UnrealCallback) -> () {
 
         // Start the logger. If this fails there isn't much we can do.
         let _ = init_logger();
+
+        // Register a panic handler that will log to the log file, since our stdout/stderr
+        // are not connected to anything.
+        std::panic::set_hook(Box::new(|p| {
+            log::error!("Panic: {p:#?}");
+        }));
 
         // Construct the debugger state.
         dbg.replace(Debugger::new());
