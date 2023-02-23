@@ -13,8 +13,9 @@ use super::UnrealCallback;
 use super::DEBUGGER;
 use common::{
     Breakpoint, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent, UnrealResponse,
+    Variable,
 };
-use common::{Frame, Watch, WatchKind, DEFAULT_PORT};
+use common::{Frame, WatchKind, DEFAULT_PORT};
 
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 
@@ -31,6 +32,15 @@ pub struct Debugger<W> {
     saw_show_dll: bool,
     pending_break_event: bool,
     current_line: i32,
+}
+
+/// A variable watch.
+#[derive(Debug)]
+pub struct Watch {
+    pub parent: usize,
+    pub name: String,
+    pub value: String,
+    pub children: Vec<usize>,
 }
 
 #[derive(Error, Debug)]
@@ -61,9 +71,24 @@ where
     pub fn new() -> Debugger<W> {
         Debugger {
             class_hierarchy: Vec::new(),
-            local_watches: Vec::new(),
-            global_watches: Vec::new(),
-            user_watches: Vec::new(),
+            local_watches: vec![Watch {
+                parent: 0,
+                name: "ROOT".to_string(),
+                value: "***".to_string(),
+                children: vec![],
+            }],
+            global_watches: vec![Watch {
+                parent: 0,
+                name: "ROOT".to_string(),
+                value: "***".to_string(),
+                children: vec![],
+            }],
+            user_watches: vec![Watch {
+                parent: 0,
+                name: "ROOT".to_string(),
+                value: "***".to_string(),
+                children: vec![],
+            }],
             callstack: Vec::new(),
             current_object_name: None,
             event_channel: None,
@@ -71,6 +96,14 @@ where
             saw_show_dll: false,
             pending_break_event: false,
             current_line: 0,
+        }
+    }
+
+    fn get_watches(&mut self, kind: WatchKind) -> &mut Vec<Watch> {
+        match kind {
+            WatchKind::Local => &mut self.local_watches,
+            WatchKind::Global => &mut self.global_watches,
+            WatchKind::User => &mut self.user_watches,
         }
     }
 
@@ -115,9 +148,9 @@ where
                 // callback.
                 Ok(None)
             }
-            UnrealCommand::WatchCount(kind) => {
+            UnrealCommand::WatchCount(kind, parent) => {
                 log::trace!("WatchCount: {kind:?}");
-                let count = self.watch_count(kind);
+                let count = self.watch_count(kind, parent);
                 self.send_response(&UnrealResponse::WatchCount(count))?;
                 Ok(None)
             }
@@ -127,6 +160,35 @@ where
                 let frame = self.callstack.iter().nth_back(idx);
                 log::trace!("The {idx}th frame is {frame:#?}");
                 self.send_response(&UnrealResponse::Frame(frame.cloned()))?;
+                Ok(None)
+            }
+            UnrealCommand::Variables(kind, frame, parent, start, count) => {
+                log::trace!(
+                    "Variable: {kind:?} frame={frame} parent={parent} start={start} count={count}"
+                );
+                // TODO Handle frames other than the first.
+
+                let list = self.get_watches(kind);
+
+                // Iterate the children of 'parent' according to the requested bounds and return
+                // a vector containing clones of the watches for these children.
+                let vars = list[parent]
+                    .children
+                    .iter()
+                    .skip(start)
+                    .take(count)
+                    .map(|n| {
+                        let watch = &list[*n];
+                        Variable {
+                            name: watch.name.clone(),
+                            value: watch.value.clone(),
+                            index: *n,
+                            has_children: !watch.children.is_empty(),
+                        }
+                    })
+                    .collect();
+
+                self.send_response(&UnrealResponse::Variables(vars))?;
                 Ok(None)
             }
         }
@@ -204,11 +266,17 @@ where
     }
 
     pub fn clear_watch(&mut self, kind: WatchKind) -> () {
-        match kind {
-            WatchKind::Local => self.local_watches.clear(),
-            WatchKind::Global => self.global_watches.clear(),
-            WatchKind::User => self.user_watches.clear(),
-        }
+        let list = self.get_watches(kind);
+        list.clear();
+
+        // Add the root node to the list. This will let us track all children
+        // of the root for easy access.
+        list.push(Watch {
+            parent: 0,
+            name: "ROOT".to_string(),
+            value: "***".to_string(),
+            children: vec![],
+        });
     }
 
     pub fn add_watch(
@@ -218,25 +286,34 @@ where
         name: *const c_char,
         value: *const c_char,
     ) -> i32 {
+        // Unreal will give us watches with a parent of -1 for 'root' variables in a given scope.
+        // Map these to index 0.
+        let parent = if parent <= 0 { 0 } else { parent as usize };
         let watch = Watch {
             parent,
             name: self.decode_string(name),
             value: self.decode_string(value),
+            children: vec![],
         };
-        let vec: &mut Vec<Watch> = match kind {
-            WatchKind::Local => self.local_watches.as_mut(),
-            WatchKind::Global => self.global_watches.as_mut(),
-            WatchKind::User => self.user_watches.as_mut(),
-        };
+        let vec = self.get_watches(kind);
 
-        // The given parent must be a member of our vector already. Note that
-        // Unreal indicates root variables with parent -1.
+        // The given parent must be a member of our vector already.
+        // We should have already introduced the 'root' node at index 0 when
+        // we cleared the watches.
         assert!(parent < vec.len().try_into().unwrap());
 
         // Add the new entry to the vector and return an identifier for it:
         // the index of this entry in the vector.
         vec.push(watch);
-        vec.len() as i32 - 1
+
+        let new_entry = vec.len() - 1;
+
+        // Record the new entry in the children list of the parent
+        vec[parent].children.push(new_entry);
+
+        // Just panic if we overflow the i32 return value Unreal wants us to give it. This is
+        // pretty unlikely to ever occur without Unreal running out of memory first...
+        new_entry.try_into().unwrap()
     }
 
     pub fn lock_watchlist(&mut self) -> () {}
@@ -328,17 +405,8 @@ where
         }
     }
 
-    pub fn watch_count(&mut self, kind: WatchKind) -> i32 {
-        let vec = match kind {
-            WatchKind::Local => &self.local_watches,
-            WatchKind::Global => &self.global_watches,
-            WatchKind::User => &self.user_watches,
-        };
-
-        vec.iter().filter(|x| x.parent == -1)
-            .count()
-            .try_into()
-            .unwrap_or(i32::MAX)
+    pub fn watch_count(&mut self, kind: WatchKind, parent: usize) -> usize {
+        self.get_watches(kind)[parent].children.len()
     }
 
     /// Record the current object name. This is updated each time unreal stops.
@@ -544,18 +612,18 @@ mod tests {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
         let mut dbg = Debugger::<MockStream>::new();
-        assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 0);
-        assert_eq!(dbg.local_watches.len(), 1);
-        assert_eq!(dbg.global_watches.len(), 0);
-        assert_eq!(dbg.user_watches.len(), 0);
-        assert_eq!(dbg.add_watch(WatchKind::Global, -1, name, val), 0);
-        assert_eq!(dbg.local_watches.len(), 1);
-        assert_eq!(dbg.global_watches.len(), 1);
-        assert_eq!(dbg.user_watches.len(), 0);
-        assert_eq!(dbg.add_watch(WatchKind::User, -1, name, val), 0);
-        assert_eq!(dbg.local_watches.len(), 1);
+        assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 1);
+        assert_eq!(dbg.local_watches.len(), 2);
         assert_eq!(dbg.global_watches.len(), 1);
         assert_eq!(dbg.user_watches.len(), 1);
+        assert_eq!(dbg.add_watch(WatchKind::Global, -1, name, val), 1);
+        assert_eq!(dbg.local_watches.len(), 2);
+        assert_eq!(dbg.global_watches.len(), 2);
+        assert_eq!(dbg.user_watches.len(), 1);
+        assert_eq!(dbg.add_watch(WatchKind::User, -1, name, val), 1);
+        assert_eq!(dbg.local_watches.len(), 2);
+        assert_eq!(dbg.global_watches.len(), 2);
+        assert_eq!(dbg.user_watches.len(), 2);
     }
 
     #[test]
@@ -567,9 +635,9 @@ mod tests {
         dbg.add_watch(WatchKind::Global, -1, name, val);
         dbg.add_watch(WatchKind::User, -1, name, val);
         dbg.clear_watch(WatchKind::Local);
-        assert_eq!(dbg.local_watches.len(), 0);
-        assert_eq!(dbg.global_watches.len(), 1);
-        assert_eq!(dbg.user_watches.len(), 1);
+        assert_eq!(dbg.local_watches.len(), 1);
+        assert_eq!(dbg.global_watches.len(), 2);
+        assert_eq!(dbg.user_watches.len(), 2);
     }
 
     #[test]
@@ -578,7 +646,7 @@ mod tests {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
         let mut dbg = Debugger::<MockStream>::new();
-        dbg.add_watch(WatchKind::Local, 0, name, val);
+        dbg.add_watch(WatchKind::Local, 1, name, val);
     }
 
     #[test]
@@ -733,9 +801,9 @@ mod tests {
     #[test]
     fn empty_watch_count() {
         let mut dbg = Debugger::<MockStream>::new();
-        assert_eq!(dbg.watch_count(WatchKind::Local), 0);
-        assert_eq!(dbg.watch_count(WatchKind::Global), 0);
-        assert_eq!(dbg.watch_count(WatchKind::User), 0);
+        assert_eq!(dbg.watch_count(WatchKind::Local, 0), 0);
+        assert_eq!(dbg.watch_count(WatchKind::Global, 0), 0);
+        assert_eq!(dbg.watch_count(WatchKind::User, 0), 0);
     }
 
     #[test]
@@ -753,10 +821,10 @@ mod tests {
             "Var2\0".as_ptr() as *const i8,
             "0\0".as_ptr() as *const i8,
         );
-        assert_eq!(dbg.watch_count(WatchKind::Local), 2);
-        assert_eq!(dbg.watch_count(WatchKind::Local), 2);
-        assert_eq!(dbg.watch_count(WatchKind::Global), 0);
-        assert_eq!(dbg.watch_count(WatchKind::User), 0);
+        assert_eq!(dbg.watch_count(WatchKind::Local, 0), 2);
+        assert_eq!(dbg.watch_count(WatchKind::Local, 0), 2);
+        assert_eq!(dbg.watch_count(WatchKind::Global, 0), 0);
+        assert_eq!(dbg.watch_count(WatchKind::User, 0), 0);
     }
 
     #[test]
@@ -774,9 +842,9 @@ mod tests {
             "Var2\0".as_ptr() as *const i8,
             "0\0".as_ptr() as *const i8,
         );
-        assert_eq!(dbg.watch_count(WatchKind::Local), 0);
-        assert_eq!(dbg.watch_count(WatchKind::Global), 2);
-        assert_eq!(dbg.watch_count(WatchKind::User), 0);
+        assert_eq!(dbg.watch_count(WatchKind::Local, 0), 0);
+        assert_eq!(dbg.watch_count(WatchKind::Global, 0), 2);
+        assert_eq!(dbg.watch_count(WatchKind::User, 0), 0);
     }
 
     #[test]
@@ -790,13 +858,13 @@ mod tests {
         );
         dbg.add_watch(
             WatchKind::Global,
-            0,
+            1,
             "subfield\0".as_ptr() as *const i8,
             "0\0".as_ptr() as *const i8,
         );
         dbg.add_watch(
             WatchKind::Global,
-            0,
+            1,
             "subfield2\0".as_ptr() as *const i8,
             "0\0".as_ptr() as *const i8,
         );
@@ -808,10 +876,10 @@ mod tests {
         );
         dbg.add_watch(
             WatchKind::Global,
-            3,
+            4,
             "subfield\0".as_ptr() as *const i8,
             "0\0".as_ptr() as *const i8,
         );
-        assert_eq!(dbg.watch_count(WatchKind::Global), 2);
+        assert_eq!(dbg.watch_count(WatchKind::Global, 0), 2);
     }
 }

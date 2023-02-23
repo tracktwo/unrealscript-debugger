@@ -31,7 +31,7 @@ use bit_field::BitField;
 /// This scheme wastes some bits, but the client is unlikely to be able to support
 /// any situation where we'd exceed these limits.
 #[derive(Debug)]
-struct VariableReference {
+pub struct VariableReference {
     kind: WatchKind,
     frame: u32,
     variable: u32,
@@ -46,43 +46,66 @@ impl VariableReference {
             panic!("Frame limit exceeded!");
         }
 
-        VariableReference{ kind, frame, variable }
+        VariableReference {
+            kind,
+            frame,
+            variable,
+        }
     }
 
     /// Decode an i64 from DAP back into a variable reference, or None if it is not
     /// a valid encoding.
     pub fn from_int(v: i64) -> Option<VariableReference> {
-
         // Extract the watch kind from the upper 8 bits. This may fail if the value
         // does not match the required format.
         let kind = match v.get_bits(56..63) {
             0 => WatchKind::Local,
             1 => WatchKind::Global,
             2 => WatchKind::User,
-            _ => return None
+            _ => return None,
         };
 
         // Extract the frame index. This cannot fail.
-        let frame:u32 = v.get_bits(32..55).try_into().unwrap();
+        let frame: u32 = v.get_bits(32..55).try_into().unwrap();
 
         // Extract the variable index. This cannot fail.
-        let variable:u32 = v.get_bits(0..31).try_into().unwrap();
+        let variable: u32 = v.get_bits(0..31).try_into().unwrap();
 
-        Some(VariableReference{ kind, frame, variable })
+        Some(VariableReference {
+            kind,
+            frame,
+            variable,
+        })
     }
 
     /// Encode a variable reference to an i64 for DAP.
     pub fn to_int(&self) -> i64 {
-        let mut v: i64 = 0;
-        v.set_bits(0..=31, self.variable.into());
-        v.set_bits(32..=55, self.frame.into());
+        let mut v: u64 = 0;
+        v.set_bits(0..32, self.variable.into());
+        v.set_bits(32..56, self.frame.into());
         match self.kind {
             WatchKind::Local => v.set_bits(56..63, 0),
             WatchKind::Global => v.set_bits(56..63, 1),
             WatchKind::User => v.set_bits(56..63, 2),
         };
 
-        v
+        // This should always succeed: we never set the topmost bit.
+        v.try_into().unwrap()
+    }
+
+    /// Obtain the kind
+    pub fn kind(&self) -> WatchKind {
+        self.kind
+    }
+
+    /// Obtain the frame
+    pub fn frame(&self) -> u32 {
+        self.frame
+    }
+
+    // Obtain the variable
+    pub fn variable(&self) -> u32 {
+        self.variable
     }
 }
 
@@ -99,5 +122,24 @@ mod tests {
     fn global_watch() {
         let v = VariableReference::new(WatchKind::Global, 1, 0);
         assert_eq!(v.to_int(), 0x01000001_00000000);
+    }
+
+    #[test]
+    fn user_watch() {
+        let v = VariableReference::new(WatchKind::User, 1, 0);
+        assert_eq!(v.to_int(), 0x02000001_00000000);
+    }
+
+    #[test]
+    fn test_big_frame() {
+        let v = VariableReference::new(WatchKind::Global, 0xFFFFFF, 0);
+        assert_eq!(v.to_int(), 0x01FFFFFF_00000000);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_too_big_frame() {
+        let v = VariableReference::new(WatchKind::Global, 0x1000000, 0);
+        v.to_int();
     }
 }

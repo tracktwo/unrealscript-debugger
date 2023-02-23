@@ -17,7 +17,7 @@ use dap::{
         AttachRequestArguments, InitializeArguments, ScopesArguments, SetBreakpointsArguments,
         StackTraceArguments, VariablesArguments,
     },
-    responses::ErrorMessage,
+    responses::{ErrorMessage, VariablesResponse},
     types::{
         Capabilities, OutputEventCategory, Scope, Source, StackFrame, StoppedEventReason, Thread,
     },
@@ -25,6 +25,7 @@ use dap::{
 use serde_json::{de::IoRead, Deserializer, Value};
 use std::fmt::Debug;
 use thiserror::Error;
+use variable_reference::VariableReference;
 
 use common::{Breakpoint, StackTraceRequest, UnrealEvent, WatchKind, DEFAULT_PORT};
 
@@ -127,13 +128,13 @@ impl Adapter for UnrealscriptAdapter {
             }
             Command::StackTrace(args) => self.stack_trace(args),
             Command::Scopes(args) => self.scopes(args),
+            Command::Variables(args) => self.variables(args),
             cmd => {
                 log::error!("Unhandled command: {cmd:#?}");
                 Err(UnrealscriptAdapterError::UnhandledCommandError(
                     request.command.name().to_string(),
                 ))
             }
-            Command::Variables(args) => self.variables(args),
         };
 
         match response {
@@ -163,6 +164,16 @@ impl UnrealscriptAdapter {
         })))
     }
 
+    /// Utility function for requests that require an active debugger connection.
+    /// Returns a unit OK result if we are connected, or an UnrealscriptAdapterError
+    /// otherwise.
+    fn ensure_connected(&mut self) -> Result<(), UnrealscriptAdapterError> {
+        self.channel
+            .as_mut()
+            .ok_or(UnrealscriptAdapterError::NotConnected)
+            .and(Ok(()))
+    }
+
     /// Handle a setBreakpoints request
     fn set_breakpoints(
         &mut self,
@@ -171,9 +182,8 @@ impl UnrealscriptAdapter {
         log::info!("Set breakpoints request");
 
         // If we are not connected we cannot proceed
-        if self.channel.is_none() {
-            return Err(UnrealscriptAdapterError::NotConnected);
-        }
+        self.ensure_connected()?;
+
         // Break the source file out into sections and record it in our map of
         // known classes if necessary.
         let path = args
@@ -324,9 +334,7 @@ impl UnrealscriptAdapter {
 
         log::info!("Stack trace request for {levels} frames starting at {start_frame}");
 
-        if self.channel.is_none() {
-            return Err(UnrealscriptAdapterError::NotConnected);
-        }
+        self.ensure_connected()?;
 
         let response = self
             .channel
@@ -380,28 +388,16 @@ impl UnrealscriptAdapter {
         ))
     }
 
-    // Returns the source corresponding to a given frame index, or None if we can't find it.
-    fn source_for_frame(&mut self, idx: i32) -> Result<Option<Source>, UnrealscriptAdapterError> {
-        if let Some(frame) = self.channel.as_mut().unwrap().frame(idx)? {
-            let canonical = frame.class_name.to_uppercase();
-            if let Some(info) = self.class_map.get(&canonical) {
-                return Ok(Some(info.to_source()));
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Return the scopes available in this suspended state. Unreal only supports two scopes: Local
     /// and Global (the third watch kind for user watches is handled by DAP and we don't need
     /// native support for it).
     fn scopes(&mut self, args: &ScopesArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        let globals_ref = args.frame_id << 1;
-        let locals_ref = args.frame_id << 1 + 1;
+        let globals_ref =
+            VariableReference::new(WatchKind::Global, args.frame_id.try_into().unwrap(), 0);
+        let locals_ref =
+            VariableReference::new(WatchKind::Local, args.frame_id.try_into().unwrap(), 0);
 
-        if self.channel.is_none() {
-            return Err(UnrealscriptAdapterError::NotConnected);
-        }
+        self.ensure_connected()?;
 
         // For the top-most frame (1) only, fetch all the watch data from the debugger.
         let local_vars = if args.frame_id == 1 {
@@ -409,8 +405,11 @@ impl UnrealscriptAdapter {
                 self.channel
                     .as_mut()
                     .unwrap()
-                    .watch_count(WatchKind::Local)?
-                    .into(),
+                    .watch_count(WatchKind::Local, 0)?
+                    .try_into()
+                    .or(Err(UnrealscriptAdapterError::LimitExceeded(
+                        "Too many variables".to_string(),
+                    )))?,
             )
         } else {
             None
@@ -421,8 +420,11 @@ impl UnrealscriptAdapter {
                 self.channel
                     .as_mut()
                     .unwrap()
-                    .watch_count(WatchKind::Global)?
-                    .into(),
+                    .watch_count(WatchKind::Global, 0)?
+                    .try_into()
+                    .or(Err(UnrealscriptAdapterError::LimitExceeded(
+                        "Too many variables".to_string(),
+                    )))?,
             )
         } else {
             None
@@ -432,14 +434,14 @@ impl UnrealscriptAdapter {
             scopes: vec![
                 Scope {
                     name: "Globals".to_string(),
-                    variables_reference: globals_ref,
+                    variables_reference: globals_ref.to_int(),
                     named_variables: global_vars,
                     expensive: args.frame_id != 1,
                     ..Default::default()
                 },
                 Scope {
                     name: "Locals".to_string(),
-                    variables_reference: locals_ref,
+                    variables_reference: locals_ref.to_int(),
                     named_variables: local_vars,
                     expensive: args.frame_id != 1,
                     ..Default::default()
@@ -448,8 +450,56 @@ impl UnrealscriptAdapter {
         }))
     }
 
-    fn variables(&mut self, args: &VariablesArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        todo!()
+    /// Return the variables requested.
+    fn variables(
+        &mut self,
+        args: &VariablesArguments,
+    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        self.ensure_connected()?;
+
+        let var = VariableReference::from_int(args.variables_reference).ok_or(
+            UnrealscriptAdapterError::LimitExceeded("Variable reference out of range".to_string()),
+        )?;
+
+        if var.frame() != 1 {
+            return Err(UnrealscriptAdapterError::UnhandledCommandError(
+                "can't handle other frames yet".to_string(),
+            ));
+        }
+
+        // TODO Handle filtering.
+        let vars =
+            self.channel.as_mut().unwrap().variables(
+                var.kind(),
+                var.frame().try_into().unwrap(),
+                var.variable().try_into().unwrap(),
+                args.start.unwrap_or(0).try_into().or(Err(
+                    UnrealscriptAdapterError::LimitExceeded("Start index out of range".to_string()),
+                ))?,
+                args.count.unwrap_or(0).try_into().or(Err(
+                    UnrealscriptAdapterError::LimitExceeded("Count out of range".to_string()),
+                ))?,
+            )?;
+
+        Ok(ResponseBody::Variables(VariablesResponse {
+            variables: vars
+                .iter()
+                .map(|v| dap::types::Variable {
+                    name: v.name.clone(),
+                    value: v.value.clone(),
+                    variables_reference: if v.has_children {
+                        let idx = v.index.try_into().unwrap_or_else(|_| {
+                            log::error!("Variable out of range");
+                            0
+                        });
+                        VariableReference::new(var.kind(), var.frame(), idx).to_int()
+                    } else {
+                        0
+                    },
+                    ..Default::default()
+                })
+                .collect(),
+        }))
     }
 }
 
@@ -635,12 +685,23 @@ mod tests {
             Ok(common::StackTraceResponse { frames: vec![] })
         }
 
-        fn watch_count(&mut self, _kind: WatchKind) -> Result<i32, ChannelError> {
+        fn watch_count(&mut self, _kind: WatchKind, _parent: usize) -> Result<usize, ChannelError> {
             Ok(0)
         }
 
         fn frame(&mut self, _idx: i32) -> Result<Option<Frame>, ChannelError> {
             Ok(None)
+        }
+
+        fn variables(
+            &mut self,
+            _kind: WatchKind,
+            _frame: usize,
+            _variable: usize,
+            _start: usize,
+            _count: usize,
+        ) -> Result<Vec<common::Variable>, ChannelError> {
+            Ok(vec![])
         }
     }
 

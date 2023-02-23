@@ -45,13 +45,6 @@ pub struct StackTraceResponse {
     pub frames: Vec<Frame>,
 }
 
-/// A variable watch.
-pub struct Watch {
-    pub parent: i32,
-    pub name: String,
-    pub value: String,
-}
-
 /// A callstack frame.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Frame {
@@ -61,7 +54,7 @@ pub struct Frame {
 }
 
 /// The kind of watch, e.g. scope or user-defined watches.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum WatchKind {
     Local,
     Global,
@@ -80,6 +73,14 @@ impl WatchKind {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Variable {
+    pub name: String,
+    pub value: String,
+    pub index: usize,
+    pub has_children: bool,
+}
+
 /// Commands that can be sent from the adapter to the debugger interface.
 #[derive(Serialize, Deserialize)]
 pub enum UnrealCommand {
@@ -93,9 +94,12 @@ pub enum UnrealCommand {
     StackTrace(StackTraceRequest),
     // Determine the number of watches of the given kind in the currently active
     // frame.
-    WatchCount(WatchKind),
+    WatchCount(WatchKind, usize),
     // Retreive information about a particular frame.
     Frame(i32),
+    // Retreive variables. This returns all children of a particular parent (either a scope or
+    // a structured variable).
+    Variables(WatchKind, usize, usize, usize, usize),
 }
 
 /// Responses that can be sent from the debugger interface to the adapter, but only
@@ -105,8 +109,9 @@ pub enum UnrealResponse {
     BreakpointAdded(Breakpoint),
     BreakpointRemoved(Breakpoint),
     StackTrace(StackTraceResponse),
-    WatchCount(i32),
+    WatchCount(usize),
     Frame(Option<Frame>),
+    Variables(Vec<Variable>),
 }
 
 /// Events that can be sent from the interface at any time.

@@ -2,7 +2,7 @@ use std::{net::TcpStream, time::Duration};
 
 use common::{
     Breakpoint, Frame, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealResponse,
-    WatchKind,
+    Variable, WatchKind,
 };
 use ipmpsc::{Receiver, SharedRingBuffer};
 use serde::Serialize;
@@ -49,9 +49,18 @@ pub trait UnrealChannel: Send + 'static {
     fn stack_trace(&mut self, stack: StackTraceRequest)
         -> Result<StackTraceResponse, ChannelError>;
 
-    fn watch_count(&mut self, kind: WatchKind) -> Result<i32, ChannelError>;
+    fn watch_count(&mut self, kind: WatchKind, parent: usize) -> Result<usize, ChannelError>;
 
     fn frame(&mut self, frame: i32) -> Result<Option<Frame>, ChannelError>;
+
+    fn variables(
+        &mut self,
+        kind: WatchKind,
+        frame: usize,
+        variable: usize,
+        start: usize,
+        count: usize,
+    ) -> Result<Vec<Variable>, ChannelError>;
 }
 
 /// The DefaultChannel uses two communications modes for talking to the debugger interface.
@@ -130,8 +139,8 @@ impl UnrealChannel for DefaultChannel {
         }
     }
 
-    fn watch_count(&mut self, kind: WatchKind) -> Result<i32, ChannelError> {
-        UnrealCommand::WatchCount(kind).serialize(&mut self.sender)?;
+    fn watch_count(&mut self, kind: WatchKind, parent: usize) -> Result<usize, ChannelError> {
+        UnrealCommand::WatchCount(kind, parent).serialize(&mut self.sender)?;
         match self.next_response() {
             Ok(UnrealResponse::WatchCount(count)) => Ok(count),
             Ok(_) => Err(ChannelError::ProtocolError),
@@ -144,6 +153,24 @@ impl UnrealChannel for DefaultChannel {
 
         match self.next_response() {
             Ok(UnrealResponse::Frame(frame)) => Ok(frame),
+            Ok(_) => Err(ChannelError::ProtocolError),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn variables(
+        &mut self,
+        kind: WatchKind,
+        frame: usize,
+        variable: usize,
+        start: usize,
+        count: usize,
+    ) -> Result<Vec<Variable>, ChannelError> {
+        UnrealCommand::Variables(kind, frame, variable, start, count)
+            .serialize(&mut self.sender)?;
+
+        match self.next_response() {
+            Ok(UnrealResponse::Variables(vars)) => Ok(vars),
             Ok(_) => Err(ChannelError::ProtocolError),
             Err(e) => Err(e),
         }
