@@ -179,4 +179,13 @@ mod tests {
         );
         assert_eq!(v.to_int(), 0x402F_FFFF);
     }
+
+    #[test]
+    fn test_non_zero() {
+        // 0 is not a valid DAP variable reference. Ensure none of the watch kinds encode the 0th
+        // frame and variable to the zero value.
+        assert_ne!(VariableReference::new(WatchKind::Local, FrameIndex::create(0).unwrap(), VariableIndex::create(0).unwrap()).to_int(), 0);
+        assert_ne!(VariableReference::new(WatchKind::Global, FrameIndex::create(0).unwrap(), VariableIndex::create(0).unwrap()).to_int(), 0);
+        assert_ne!(VariableReference::new(WatchKind::User, FrameIndex::create(0).unwrap(), VariableIndex::create(0).unwrap()).to_int(), 0);
+    }
 }
