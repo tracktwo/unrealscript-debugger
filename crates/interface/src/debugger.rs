@@ -13,7 +13,7 @@ use super::UnrealCallback;
 use super::DEBUGGER;
 use common::{
     Breakpoint, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent, UnrealResponse,
-    Variable,
+    Variable, VariableIndex,
 };
 use common::{Frame, WatchKind, DEFAULT_PORT};
 
@@ -173,9 +173,22 @@ where
                 // A count of 0 means all elements.
                 let count = if count == 0 { usize::MAX } else { count };
 
+                let idx: usize = parent.into();
+
+                // If the parent is out of range then we have nothing to return. Log an error and
+                // return an empty vector.
+                if idx >= list.len() {
+                    log::error!(
+                        "Variable: Parent index out of range. Got {idx} but size is {}",
+                        list.len()
+                    );
+                    self.send_response(&UnrealResponse::Variables(vec![]))?;
+                    return Ok(None);
+                }
+
                 // Iterate the children of 'parent' according to the requested bounds and return
                 // a vector containing clones of the watches for these children.
-                let vars: Vec<Variable> = list[parent]
+                let vars: Vec<Variable> = list[idx]
                     .children
                     .iter()
                     .skip(start)
@@ -185,7 +198,7 @@ where
                         Variable {
                             name: watch.name.clone(),
                             value: watch.value.clone(),
-                            index: *n,
+                            index: VariableIndex::create((*n).try_into().unwrap()).unwrap(),
                             has_children: !watch.children.is_empty(),
                         }
                     })

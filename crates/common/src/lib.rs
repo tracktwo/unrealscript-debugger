@@ -14,9 +14,96 @@
 //! Events are unpredictable, asynchronous events that are not tied to a particular
 //! command (e.g. a log line being added or a break event).
 
+use std::fmt::Display;
+
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: i32 = 18777;
+
+#[derive(Debug)]
+pub struct OutOfRangeError;
+
+/// A valid frame index. Unreal does not impose a limit on the number of frames,
+/// and DAP has no practical limit (it uses a 'number' for them) but our variable
+/// encoding scheme allocates only 9 bits to a frame index.
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+pub struct FrameIndex(u16);
+
+impl FrameIndex {
+    pub const MAX: u16 = 0x1FF;
+
+    pub fn create(val: i64) -> Result<Self, OutOfRangeError> {
+        if val > Self::MAX.into() {
+            Err(OutOfRangeError)
+        } else {
+            Ok(FrameIndex(val.try_into().unwrap()))
+        }
+    }
+}
+
+impl Into<u64> for FrameIndex {
+    fn into(self) -> u64 {
+        self.0.into()
+    }
+}
+
+impl Display for FrameIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A valid variable index. Unreal uses a signed 32-bit integer to represent
+/// variables returned from AddAWatch, but it's not documented if negative
+/// values are actually supported other than the special -1 value it uses to
+/// represent root variables. We don't expose the negative value outside of the
+/// interface so will use an unsigned value, but we do limit variable indices
+/// to only 20 bits.
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+pub struct VariableIndex(u32);
+
+impl VariableIndex {
+    /// The largest variable index we can represent: must fit in 20 bits.
+    pub const MAX: u32 = 0xF_FFFF;
+
+    /// A variable index reprsenting a scope root.
+    pub const SCOPE: VariableIndex = VariableIndex(0);
+
+    pub fn create(val: u32) -> Result<Self, OutOfRangeError> {
+        if val > Self::MAX {
+            Err(OutOfRangeError)
+        } else {
+            Ok(VariableIndex(val))
+        }
+    }
+}
+
+impl Into<u32> for VariableIndex {
+    fn into(self) -> u32 {
+        self.0
+    }
+}
+
+impl Into<u64> for VariableIndex {
+    fn into(self) -> u64 {
+        self.0.into()
+    }
+}
+
+impl Into<usize> for VariableIndex {
+    /// Convert a variable index to a 'usize'. This is guaranteed to work on any
+    /// platform where usize >= 32 bits, and Unreal doesn't run on any platforms
+    /// where this isn't the case.
+    fn into(self) -> usize {
+        self.0.try_into().unwrap()
+    }
+}
+
+impl Display for VariableIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Representation of a breakpoint.
 #[derive(Serialize, Deserialize, Clone)]
@@ -77,7 +164,7 @@ impl WatchKind {
 pub struct Variable {
     pub name: String,
     pub value: String,
-    pub index: usize,
+    pub index: VariableIndex,
     pub has_children: bool,
 }
 
@@ -99,7 +186,7 @@ pub enum UnrealCommand {
     Frame(i32),
     // Retreive variables. This returns all children of a particular parent (either a scope or
     // a structured variable).
-    Variables(WatchKind, usize, usize, usize, usize),
+    Variables(WatchKind, FrameIndex, VariableIndex, usize, usize),
 }
 
 /// Responses that can be sent from the debugger interface to the adapter, but only

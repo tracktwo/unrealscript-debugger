@@ -1,8 +1,8 @@
 use std::{net::TcpStream, time::Duration};
 
 use common::{
-    Breakpoint, Frame, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealResponse,
-    Variable, WatchKind,
+    Breakpoint, Frame, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand,
+    UnrealResponse, Variable, VariableIndex, WatchKind,
 };
 use ipmpsc::{Receiver, SharedRingBuffer};
 use serde::Serialize;
@@ -56,8 +56,8 @@ pub trait UnrealChannel: Send + 'static {
     fn variables(
         &mut self,
         kind: WatchKind,
-        frame: usize,
-        variable: usize,
+        frame: FrameIndex,
+        variable: VariableIndex,
         start: usize,
         count: usize,
     ) -> Result<Vec<Variable>, ChannelError>;
@@ -161,8 +161,8 @@ impl UnrealChannel for DefaultChannel {
     fn variables(
         &mut self,
         kind: WatchKind,
-        frame: usize,
-        variable: usize,
+        frame: FrameIndex,
+        variable: VariableIndex,
         start: usize,
         count: usize,
     ) -> Result<Vec<Variable>, ChannelError> {

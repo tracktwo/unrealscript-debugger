@@ -27,7 +27,9 @@ use std::fmt::Debug;
 use thiserror::Error;
 use variable_reference::VariableReference;
 
-use common::{Breakpoint, StackTraceRequest, UnrealEvent, WatchKind, DEFAULT_PORT};
+use common::{
+    Breakpoint, FrameIndex, StackTraceRequest, UnrealEvent, VariableIndex, WatchKind, DEFAULT_PORT,
+};
 
 use comm::{ChannelError, UnrealChannel};
 
@@ -368,8 +370,8 @@ impl UnrealscriptAdapter {
                             });
                         }
                         StackFrame {
-                            // We'll use the index into the stack frame vector as the id, offset by 1.
-                            id: i as i64 + 1 + start_frame as i64,
+                            // We'll use the index into the stack frame vector as the id
+                            id: i as i64 + start_frame as i64,
                             name: f.class_name,
                             source,
                             line: f.line as i64,
@@ -392,15 +394,19 @@ impl UnrealscriptAdapter {
     /// and Global (the third watch kind for user watches is handled by DAP and we don't need
     /// native support for it).
     fn scopes(&mut self, args: &ScopesArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        let frame_index = FrameIndex::create(args.frame_id).or(Err(
+            UnrealscriptAdapterError::LimitExceeded("Frame index out of range".to_string()),
+        ))?;
+
         let globals_ref =
-            VariableReference::new(WatchKind::Global, args.frame_id.try_into().unwrap(), 0);
+            VariableReference::new(WatchKind::Global, frame_index, VariableIndex::SCOPE);
         let locals_ref =
-            VariableReference::new(WatchKind::Local, args.frame_id.try_into().unwrap(), 0);
+            VariableReference::new(WatchKind::Local, frame_index, VariableIndex::SCOPE);
 
         self.ensure_connected()?;
 
-        // For the top-most frame (1) only, fetch all the watch data from the debugger.
-        let local_vars = if args.frame_id == 1 {
+        // For the top-most frame (0) only, fetch all the watch data from the debugger.
+        let local_vars = if args.frame_id == 0 {
             Some(
                 self.channel
                     .as_mut()
@@ -415,7 +421,7 @@ impl UnrealscriptAdapter {
             None
         };
 
-        let global_vars = if args.frame_id == 1 {
+        let global_vars = if args.frame_id == 0 {
             Some(
                 self.channel
                     .as_mut()
@@ -436,14 +442,14 @@ impl UnrealscriptAdapter {
                     name: "Locals".to_string(),
                     variables_reference: locals_ref.to_int(),
                     named_variables: local_vars,
-                    expensive: args.frame_id != 1,
+                    expensive: args.frame_id != 0,
                     ..Default::default()
                 },
                 Scope {
                     name: "Globals".to_string(),
                     variables_reference: globals_ref.to_int(),
                     named_variables: global_vars,
-                    expensive: args.frame_id != 1,
+                    expensive: args.frame_id != 0,
                     ..Default::default()
                 },
             ],
@@ -461,7 +467,7 @@ impl UnrealscriptAdapter {
             UnrealscriptAdapterError::LimitExceeded("Variable reference out of range".to_string()),
         )?;
 
-        if var.frame() != 1 {
+        if <FrameIndex as Into<u64>>::into(var.frame()) != 0 {
             return Err(UnrealscriptAdapterError::UnhandledCommandError(
                 "can't handle other frames yet".to_string(),
             ));
@@ -488,11 +494,7 @@ impl UnrealscriptAdapter {
                     name: v.name.clone(),
                     value: v.value.clone(),
                     variables_reference: if v.has_children {
-                        let idx = v.index.try_into().unwrap_or_else(|_| {
-                            log::error!("Variable out of range");
-                            0
-                        });
-                        VariableReference::new(var.kind(), var.frame(), idx).to_int()
+                        VariableReference::new(var.kind(), var.frame(), v.index).to_int()
                     } else {
                         0
                     },
@@ -663,7 +665,7 @@ pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError
 
 #[cfg(test)]
 mod tests {
-    use common::Frame;
+    use common::{Frame, FrameIndex, VariableIndex};
     use dap::types::{Source, SourceBreakpoint};
 
     use super::*;
@@ -696,8 +698,8 @@ mod tests {
         fn variables(
             &mut self,
             _kind: WatchKind,
-            _frame: usize,
-            _variable: usize,
+            _frame: FrameIndex,
+            _variable: VariableIndex,
             _start: usize,
             _count: usize,
         ) -> Result<Vec<common::Variable>, ChannelError> {
