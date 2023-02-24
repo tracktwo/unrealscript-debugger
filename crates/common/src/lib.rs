@@ -41,6 +41,12 @@ impl FrameIndex {
     }
 }
 
+impl Into<usize> for FrameIndex {
+    fn into(self) -> usize {
+        self.0.into()
+    }
+}
+
 impl Into<u64> for FrameIndex {
     fn into(self) -> u64 {
         self.0.into()
@@ -160,12 +166,20 @@ impl WatchKind {
     }
 }
 
+/// A representation of a variable. Each variable (watch) provided by Unreal
+/// has a name, type, and value (all represented as strings). Each variable is
+/// also assigned an index that can be used to locate its children (if it has any).
+/// Structs, classes, static and dynamic arrays can all have children, with the
+/// last two being considered 'arrays'. This distinction can be important to
+/// some clients that differentiate between 'named' and 'indexed' children.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Variable {
     pub name: String,
+    pub ty: String,
     pub value: String,
     pub index: VariableIndex,
     pub has_children: bool,
+    pub is_array: bool,
 }
 
 /// Commands that can be sent from the adapter to the debugger interface.
@@ -181,9 +195,9 @@ pub enum UnrealCommand {
     StackTrace(StackTraceRequest),
     // Determine the number of watches of the given kind in the currently active
     // frame.
-    WatchCount(WatchKind, usize),
+    WatchCount(WatchKind, VariableIndex),
     // Retreive information about a particular frame.
-    Frame(i32),
+    Frame(FrameIndex),
     // Retreive variables. This returns all children of a particular parent (either a scope or
     // a structured variable).
     Variables(WatchKind, FrameIndex, VariableIndex, usize, usize),

@@ -39,8 +39,10 @@ pub struct Debugger<W> {
 pub struct Watch {
     pub parent: usize,
     pub name: String,
+    pub ty: String,
     pub value: String,
     pub children: Vec<usize>,
+    pub is_array: bool,
 }
 
 #[derive(Error, Debug)]
@@ -74,20 +76,26 @@ where
             local_watches: vec![Watch {
                 parent: 0,
                 name: "ROOT".to_string(),
+                ty: "***".to_string(),
                 value: "***".to_string(),
                 children: vec![],
+                is_array: false,
             }],
             global_watches: vec![Watch {
                 parent: 0,
                 name: "ROOT".to_string(),
+                ty: "***".to_string(),
                 value: "***".to_string(),
                 children: vec![],
+                is_array: false,
             }],
             user_watches: vec![Watch {
                 parent: 0,
                 name: "ROOT".to_string(),
+                ty: "***".to_string(),
                 value: "***".to_string(),
                 children: vec![],
+                is_array: false,
             }],
             callstack: Vec::new(),
             current_object_name: None,
@@ -150,14 +158,13 @@ where
             }
             UnrealCommand::WatchCount(kind, parent) => {
                 log::trace!("WatchCount: {kind:?}");
-                let count = self.watch_count(kind, parent);
+                let count = self.watch_count(kind, parent.into());
                 self.send_response(&UnrealResponse::WatchCount(count))?;
                 Ok(None)
             }
             UnrealCommand::Frame(idx) => {
                 log::trace!("Frame: {idx}");
-                let idx = idx as usize - 1;
-                let frame = self.callstack.iter().nth_back(idx);
+                let frame = self.callstack.iter().nth_back(idx.into());
                 log::trace!("The {idx}th frame is {frame:#?}");
                 self.send_response(&UnrealResponse::Frame(frame.cloned()))?;
                 Ok(None)
@@ -197,9 +204,11 @@ where
                         let watch = &list[*n];
                         Variable {
                             name: watch.name.clone(),
+                            ty: watch.ty.clone(),
                             value: watch.value.clone(),
                             index: VariableIndex::create((*n).try_into().unwrap()).unwrap(),
                             has_children: !watch.children.is_empty(),
+                            is_array: watch.is_array,
                         }
                     })
                     .collect();
@@ -290,8 +299,10 @@ where
         list.push(Watch {
             parent: 0,
             name: "ROOT".to_string(),
+            ty: "***".to_string(),
             value: "***".to_string(),
             children: vec![],
+            is_array: false,
         });
     }
 
@@ -305,11 +316,15 @@ where
         // Unreal will give us watches with a parent of -1 for 'root' variables in a given scope.
         // Map these to index 0.
         let parent = if parent <= 0 { 0 } else { parent as usize };
+
+        let (name, ty, is_array) = self.decompose_name(name);
         let watch = Watch {
             parent,
-            name: self.decode_string(name),
+            name,
+            ty,
             value: self.decode_string(value),
             children: vec![],
+            is_array,
         };
         let vec = self.get_watches(kind);
 
@@ -451,6 +466,48 @@ where
     /// Set the current line.
     pub fn goto_line(&mut self, line: i32) -> () {
         self.current_line = line;
+    }
+
+    /// Decompose an Unreal variable watch name into a name, type, and whether this
+    /// type is an array.
+    fn decompose_name(&mut self, ptr: *const c_char) -> (String, String, bool) {
+        let str = iso8859_1::decode_to_string(make_cstr(ptr).to_bytes());
+
+        // The name string is of the form "Name ( Ty,addr1,addr2 )".
+        // If the type is a dynamic array the type will be "Array". If it's
+        // a static array it will be "Static Ty Array".
+        if let Some(paren) = str.find('(') {
+            // Isolate the name. Skip the space before the '('.
+            let name = &str[..paren - 1];
+            // Skip the space after the '(' to isolate the type.
+            let rest = &str[paren + 2..];
+
+            // Find the end of the type. This will be up to the first comma (if there are
+            // addresses) or closing paren (if not).
+            if let Some(end_of_type) = rest.find([',', ')']) {
+                let ty = rest[..end_of_type].trim_end();
+                // If the word 'Array' appears in the type then this is some kind of array.
+                // Note that we don't have to worry about class names like MyArray incorrectly
+                // being treated as arrays as the type will be 'Object' or 'Struct', the actual
+                // name of the type does not appear here.
+                let is_array = ty.find("Array").is_some();
+                return (name.to_string(), ty.to_string(), is_array);
+            }
+        }
+        // The name string is of the form '[[ Base Class ]]'
+        else if let Some(_) = str.find("[[") {
+            return (str, "base class".to_string(), false);
+        }
+        // The name string is of the form 'ParentName[idx]'
+        // TODO: What about arrays of arrays?
+        else if let Some(_) = str.find("[") {
+            return (str, "array element".to_string(), false);
+        }
+
+        // If we failed to parse the type just return the whole thing as the name and
+        // a default type.
+        log::error!("Failed to decompose watch name and type: {str}");
+        (str, "<unknown type>".to_string(), false)
     }
 
     /// Decode an Unreal-encoded string to UTF-8.
@@ -906,5 +963,55 @@ mod tests {
             "0\0".as_ptr() as *const i8,
         );
         assert_eq!(dbg.watch_count(WatchKind::Global, 0), 2);
+    }
+
+    #[test]
+    fn simple_name() {
+        let mut dbg = Debugger::<MockStream>::new();
+        let str = "Location ( Struct,00007FF45D513A00,00007FF44F9B52F0 )\0";
+        let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
+        assert_eq!(name, "Location");
+        assert_eq!(ty, "Struct");
+        assert_eq!(is_array, false);
+    }
+
+    #[test]
+    fn static_array_name() {
+        let mut dbg = Debugger::<MockStream>::new();
+        let str = "CharacterStats ( Static Struct Array )\0";
+        let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
+        assert_eq!(name, "CharacterStats");
+        assert_eq!(ty, "Static Struct Array");
+        assert_eq!(is_array, true);
+    }
+
+    #[test]
+    fn dynamic_array_name() {
+        let mut dbg = Debugger::<MockStream>::new();
+        let str = "AWCAbilities ( Array )\0";
+        let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
+        assert_eq!(name, "AWCAbilities");
+        assert_eq!(ty, "Array");
+        assert_eq!(is_array, true);
+    }
+
+    #[test]
+    fn base_class_name() {
+        let mut dbg = Debugger::<MockStream>::new();
+        let str = "[[ Object ]]\0";
+        let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
+        assert_eq!(name, "[[ Object ]]");
+        assert_eq!(ty, "base class");
+        assert_eq!(is_array, false);
+    }
+
+    #[test]
+    fn array_element_name() {
+        let mut dbg = Debugger::<MockStream>::new();
+        let str = "SomeArray[0]\0";
+        let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
+        assert_eq!(name, "SomeArray[0]");
+        assert_eq!(ty, "array element");
+        assert_eq!(is_array, false);
     }
 }

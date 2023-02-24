@@ -47,6 +47,8 @@ pub struct UnrealscriptAdapter {
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
     one_based_lines: bool,
+    // If true then we will send type information with variables.
+    supports_variable_type: bool,
 }
 
 impl UnrealscriptAdapter {
@@ -56,6 +58,7 @@ impl UnrealscriptAdapter {
             channel: None,
             event_thread: None,
             one_based_lines: true,
+            supports_variable_type: false,
         }
     }
 }
@@ -158,10 +161,14 @@ impl UnrealscriptAdapter {
             self.one_based_lines = false;
         }
 
+        if let Some(true) = args.supports_variable_type {
+            self.supports_variable_type = true;
+        }
+
         Ok(ResponseBody::Initialize(Some(Capabilities {
             supports_configuration_done_request: Some(true),
             supports_delayed_stack_trace_loading: Some(true),
-            supports_value_formatting_options: Some(true),
+            supports_value_formatting_options: Some(false),
             ..Default::default()
         })))
     }
@@ -411,7 +418,7 @@ impl UnrealscriptAdapter {
                 self.channel
                     .as_mut()
                     .unwrap()
-                    .watch_count(WatchKind::Local, 0)?
+                    .watch_count(WatchKind::Local, VariableIndex::SCOPE)?
                     .try_into()
                     .or(Err(UnrealscriptAdapterError::LimitExceeded(
                         "Too many variables".to_string(),
@@ -426,7 +433,7 @@ impl UnrealscriptAdapter {
                 self.channel
                     .as_mut()
                     .unwrap()
-                    .watch_count(WatchKind::Global, 0)?
+                    .watch_count(WatchKind::Global, VariableIndex::SCOPE)?
                     .try_into()
                     .or(Err(UnrealscriptAdapterError::LimitExceeded(
                         "Too many variables".to_string(),
@@ -490,15 +497,42 @@ impl UnrealscriptAdapter {
         Ok(ResponseBody::Variables(VariablesResponse {
             variables: vars
                 .iter()
-                .map(|v| dap::types::Variable {
-                    name: v.name.clone(),
-                    value: v.value.clone(),
-                    variables_reference: if v.has_children {
-                        VariableReference::new(var.kind(), var.frame(), v.index).to_int()
+                .map(|v| {
+                    // If this variable is structured get the child count so we can put it in
+                    // the appropriate field of the response.
+                    let cnt = if v.has_children {
+                        self.channel
+                            .as_mut()
+                            .unwrap()
+                            .watch_count(var.kind(), v.index)
+                            .ok()
+                            .map(|c| {
+                                c.try_into().unwrap_or_else(|_| {
+                                    log::error!("Child count for var {} too large", v.name);
+                                    0
+                                })
+                            })
                     } else {
-                        0
-                    },
-                    ..Default::default()
+                        None
+                    };
+
+                    dap::types::Variable {
+                        name: v.name.clone(),
+                        value: v.value.clone(),
+                        type_field: if self.supports_variable_type {
+                            Some(v.ty.clone())
+                        } else {
+                            None
+                        },
+                        variables_reference: if v.has_children {
+                            VariableReference::new(var.kind(), var.frame(), v.index).to_int()
+                        } else {
+                            0
+                        },
+                        named_variables: if !v.is_array { cnt } else { None },
+                        indexed_variables: if v.is_array { cnt } else { None },
+                        ..Default::default()
+                    }
                 })
                 .collect(),
         }))
@@ -687,11 +721,15 @@ mod tests {
             Ok(common::StackTraceResponse { frames: vec![] })
         }
 
-        fn watch_count(&mut self, _kind: WatchKind, _parent: usize) -> Result<usize, ChannelError> {
+        fn watch_count(
+            &mut self,
+            _kind: WatchKind,
+            _parent: VariableIndex,
+        ) -> Result<usize, ChannelError> {
             Ok(0)
         }
 
-        fn frame(&mut self, _idx: i32) -> Result<Option<Frame>, ChannelError> {
+        fn frame(&mut self, _idx: FrameIndex) -> Result<Option<Frame>, ChannelError> {
             Ok(None)
         }
 

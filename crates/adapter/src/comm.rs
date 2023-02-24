@@ -49,9 +49,13 @@ pub trait UnrealChannel: Send + 'static {
     fn stack_trace(&mut self, stack: StackTraceRequest)
         -> Result<StackTraceResponse, ChannelError>;
 
-    fn watch_count(&mut self, kind: WatchKind, parent: usize) -> Result<usize, ChannelError>;
+    fn watch_count(
+        &mut self,
+        kind: WatchKind,
+        parent: VariableIndex,
+    ) -> Result<usize, ChannelError>;
 
-    fn frame(&mut self, frame: i32) -> Result<Option<Frame>, ChannelError>;
+    fn frame(&mut self, frame: FrameIndex) -> Result<Option<Frame>, ChannelError>;
 
     fn variables(
         &mut self,
@@ -139,7 +143,11 @@ impl UnrealChannel for DefaultChannel {
         }
     }
 
-    fn watch_count(&mut self, kind: WatchKind, parent: usize) -> Result<usize, ChannelError> {
+    fn watch_count(
+        &mut self,
+        kind: WatchKind,
+        parent: VariableIndex,
+    ) -> Result<usize, ChannelError> {
         UnrealCommand::WatchCount(kind, parent).serialize(&mut self.sender)?;
         match self.next_response() {
             Ok(UnrealResponse::WatchCount(count)) => Ok(count),
@@ -148,7 +156,7 @@ impl UnrealChannel for DefaultChannel {
         }
     }
 
-    fn frame(&mut self, frame: i32) -> Result<Option<Frame>, ChannelError> {
+    fn frame(&mut self, frame: FrameIndex) -> Result<Option<Frame>, ChannelError> {
         UnrealCommand::Frame(frame).serialize(&mut self.sender)?;
 
         match self.next_response() {
