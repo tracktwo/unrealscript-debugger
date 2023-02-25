@@ -97,7 +97,10 @@ pub struct DefaultChannel {
 const SHARED_MEMORY_SIZE: u32 = 1024 * 1024 * 16;
 
 /// The timeout for receiving responses from the adapter
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+const RECV_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The amount of time to wait for the connection to complete.
+const CONNECT_TIMEOUT: i32 = 30;
 
 impl DefaultChannel {
     /// Fetch the next response from the channel.
@@ -107,7 +110,7 @@ impl DefaultChannel {
     ///   Returns a ChannelError::Timeout if a message does not appear in a reasonable time.
     fn next_response(&mut self) -> Result<UnrealResponse, ChannelError> {
         self.response_receiver
-            .recv_timeout(DEFAULT_TIMEOUT)
+            .recv_timeout(RECV_TIMEOUT)
             .or(Err(ChannelError::ConnectionError))?
             .ok_or(ChannelError::Timeout)
     }
@@ -213,10 +216,26 @@ impl UnrealChannel for DefaultChannel {
 
 /// Connect to an unreal debugger adapter running at the given port number on the local computer.
 pub fn connect(
-    port: i32,
+    port: u16,
 ) -> Result<(Box<dyn UnrealChannel>, Deserializer<IoRead<TcpStream>>), ChannelError> {
-    let tcp =
-        TcpStream::connect(format!("127.0.0.1:{port}")).or(Err(ChannelError::ConnectionError))?;
+    let mut tcp: Option<TcpStream> = None;
+
+    // Try to connect, sleeping between attempts.
+    for _ in 0..CONNECT_TIMEOUT {
+        match TcpStream::connect(format!("127.0.0.1:{port}")) {
+            Ok(s) => {
+                tcp = Some(s);
+                break;
+            }
+            Err(_) => {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+
+    // If we failed to connect we can't go any further.
+    let tcp = tcp.ok_or(ChannelError::ConnectionError)?;
+
     let (path, shmem) =
         SharedRingBuffer::create_temp(SHARED_MEMORY_SIZE).or(Err(ChannelError::ConnectionError))?;
 

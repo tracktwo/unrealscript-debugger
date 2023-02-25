@@ -17,9 +17,9 @@ use dap::{
     },
     prelude::*,
     requests::{
-        AttachRequestArguments, ContinueArguments, InitializeArguments, NextArguments,
-        ScopesArguments, SetBreakpointsArguments, StackTraceArguments, StepInArguments,
-        StepOutArguments, VariablesArguments,
+        AttachRequestArguments, ContinueArguments, InitializeArguments, LaunchRequestArguments,
+        NextArguments, ScopesArguments, SetBreakpointsArguments, StackTraceArguments,
+        StepInArguments, StepOutArguments, VariablesArguments,
     },
     responses::{ContinueResponse, ErrorMessage, VariablesResponse},
     types::{
@@ -88,6 +88,9 @@ pub enum UnrealscriptAdapterError {
 
     #[error("Limit exceeded: {0}")]
     LimitExceeded(String),
+
+    #[error("Invalid program: {0}")]
+    InvalidProgram(String),
 }
 
 impl UnrealscriptAdapterError {
@@ -100,6 +103,7 @@ impl UnrealscriptAdapterError {
             UnrealscriptAdapterError::NotConnected => 3,
             UnrealscriptAdapterError::CommunicationError(_) => 4,
             UnrealscriptAdapterError::LimitExceeded(_) => 5,
+            UnrealscriptAdapterError::InvalidProgram(_) => 6,
         }
     }
 
@@ -137,6 +141,7 @@ impl Adapter for UnrealscriptAdapter {
                 return Ok(Response::make_ack(&request).expect("ConfigurationDone can be acked"))
             }
             Command::Attach(args) => self.attach(args, ctx),
+            Command::Launch(args) => self.launch(args, ctx),
             Command::Disconnect(_args) => {
                 return Ok(Response::make_ack(&request).expect("disconnect can be acked"))
             }
@@ -290,20 +295,32 @@ impl UnrealscriptAdapter {
     }
 
     // Extract the port number from an attach arguments value map.
-    fn extract_port(value: &Option<Value>) -> Option<i32> {
+    fn extract_port(value: &Option<Value>) -> Option<u16> {
         value.as_ref()?["port"].as_i64()?.try_into().ok()
     }
 
-    /// Attach to a running unreal process
-    fn attach(
+    /// Extract the program from launch arguments.
+    fn extract_program(value: &Option<Value>) -> Option<&str> {
+        value.as_ref()?["program"].as_str()
+    }
+
+    /// Extract the argument list from launch arguments.
+    fn extract_args(value: &Option<Value>) -> Option<impl Iterator<Item = &str>> {
+        let arr = value.as_ref()?["args"].as_array()?;
+        Some(
+            arr.iter()
+                .filter(|e| e.is_string())
+                .map(|e| e.as_str().unwrap()),
+        )
+    }
+
+    /// Connect to the debugger interface. When connected this will send an 'initialized' event to
+    /// DAP. This is shared by both the 'launch' and 'attach' requests.
+    fn connect_to_interface(
         &mut self,
-        args: &AttachRequestArguments,
+        port: u16,
         ctx: &mut dyn Context,
-    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        log::info!("Attach request");
-
-        let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
-
+    ) -> Result<(), UnrealscriptAdapterError> {
         log::info!("Connecting to port {port}");
 
         let event_sender = ctx.get_event_sender();
@@ -332,7 +349,79 @@ impl UnrealscriptAdapter {
             ChannelError::ConnectionError,
         )))?;
 
+        Ok(())
+    }
+
+    /// Attach to a running unreal process
+    fn attach(
+        &mut self,
+        args: &AttachRequestArguments,
+        ctx: &mut dyn Context,
+    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        log::info!("Attach request");
+        let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
+        self.connect_to_interface(port, ctx)?;
         Ok(ResponseBody::Attach)
+    }
+
+    /// Launch a process and attach to it.
+    fn launch(
+        &mut self,
+        args: &LaunchRequestArguments,
+        ctx: &mut dyn Context,
+    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        let program = Self::extract_program(&args.other).ok_or(
+            UnrealscriptAdapterError::InvalidProgram("No program provided".to_string()),
+        )?;
+
+        let program_args = Self::extract_args(&args.other);
+
+        let mut command = &mut std::process::Command::new(program);
+        if program_args.is_some() {
+            command = command.args(program_args.unwrap());
+            log::info!("Program args are {:#?}", command.get_args());
+        }
+
+        // Unless instructed otherwise we're going to debug the launched process, so pass
+        // '-autoDebug' and try to connect. If 'no_debug' is 'true' then we're just launching and
+        // will not try to debug. We could get a later 'attach' request, in which case we can
+        // attach, but that also requires the user to enable the debugger from the unreal side with
+        // 'toggledebugger'.
+        let auto_debug = match args.no_debug {
+            Some(true) => false,
+            _ => true,
+        };
+
+        // Append '-autoDebug' if we're launching so we can be sure the interface will launch and
+        // we can connect.
+        if auto_debug {
+            command = command.arg("-autoDebug");
+        }
+
+        log::info!(
+            "Launching {} with arguments {:#?}",
+            program,
+            command.get_args()
+        );
+        // Spawn the process. We don't bother keeping the handle around: we don't support
+        // restarting, so to implement restart the client will just kill the existing adapter and
+        // spawn a new one. This will also kill the child process.
+        // TODO This is wrong: we should keep the handle and detect if the process has ended and
+        // use that to terminate the debugging process.
+        command
+            .spawn()
+            .or(Err(UnrealscriptAdapterError::InvalidProgram(format!(
+                "Failed to launch {0}",
+                program
+            ))))?;
+
+        // If we're auto-debugging we can now connect to the interface.
+        if auto_debug {
+            let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
+            self.connect_to_interface(port, ctx)?;
+        }
+
+        Ok(ResponseBody::Launch)
     }
 
     /// Fetch the stack from the interface and send it to the client.

@@ -18,7 +18,7 @@ use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_PORT: i32 = 18777;
+pub const DEFAULT_PORT: u16 = 18777u16;
 
 #[derive(Debug)]
 pub struct OutOfRangeError;
