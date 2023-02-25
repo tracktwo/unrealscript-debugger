@@ -20,3 +20,8 @@ path="breakpoints.rs"
 [[test]]
 name="log"
 path="log.rs"
+
+[[test]]
+name="variables"
+path="variables.rs"
+

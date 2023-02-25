@@ -124,6 +124,7 @@ where
                 command: Command::Initialize(requests::InitializeArguments {
                     client_id: Some("test".to_string()),
                     lines_start_at1: Some(true),
+                    supports_variable_type: Some(true),
                     ..Default::default()
                 }),
             },

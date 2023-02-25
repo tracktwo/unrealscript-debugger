@@ -53,7 +53,7 @@ fn hit_breakpoint() {
 
     match response.body.unwrap() {
         ResponseBody::SetBreakpoints(_) => (),
-        _o => assert!(false, "Expected a setbreakpoints response: {_o:#?}"),
+        o => assert!(false, "Expected a setbreakpoints response: {o:#?}"),
     }
 
     fixture::wait_for_thread(handle);
