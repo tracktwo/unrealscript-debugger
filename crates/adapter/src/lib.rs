@@ -515,9 +515,18 @@ impl UnrealscriptAdapter {
         // Spawn the process. We don't bother keeping the handle around: we don't support
         // restarting, so to implement restart the client will just kill the existing adapter and
         // spawn a new one. This will also kill the child process.
+        //
+        // Note we must disconnect all streams (or we could pipe them elsewhere...). By
+        // default in/out/err streams are inherited from the parent process, and we do _not_ want
+        // unreal writing to out stdout or reading from stdin since those are our communication
+        // channel with the DAP client.
+        //
         // TODO This is wrong: we should keep the handle and detect if the process has ended and
         // use that to terminate the debugging process.
         command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .or(Err(UnrealscriptAdapterError::InvalidProgram(format!(
                 "Failed to launch {0}",
