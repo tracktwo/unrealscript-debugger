@@ -12,7 +12,6 @@ use dap::{
     prelude::{Adapter, Context, Event},
     requests::{self, Command, Request},
     responses::ResponseBody,
-    reverse_requests::ReverseRequest,
 };
 use interface::debugger::Debugger;
 use serde_json::{json, Map, Value};
@@ -44,11 +43,7 @@ pub struct MockContext {
 
 /// A mock context. Events and reverse requests sent to this context are silently discarded.
 impl Context for MockContext {
-    fn send_event(&mut self, _event: dap::prelude::Event) -> dap::client::Result<()> {
-        Ok(())
-    }
-
-    fn send_reverse_request(&mut self, _request: ReverseRequest) -> dap::client::Result<()> {
+    fn send_event(&mut self, _event: dap::prelude::Event) -> Result<(), SendError<Event>> {
         Ok(())
     }
 
