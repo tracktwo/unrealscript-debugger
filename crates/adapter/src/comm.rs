@@ -64,7 +64,12 @@ pub trait UnrealChannel: Send + 'static {
         variable: VariableIndex,
         start: usize,
         count: usize,
-    ) -> Result<Vec<Variable>, ChannelError>;
+    ) -> Result<(Vec<Variable>, bool), ChannelError>;
+
+    fn go(&mut self) -> Result<(), ChannelError>;
+    fn next(&mut self) -> Result<(), ChannelError>;
+    fn step_in(&mut self) -> Result<(), ChannelError>;
+    fn step_out(&mut self) -> Result<(), ChannelError>;
 }
 
 /// The DefaultChannel uses two communications modes for talking to the debugger interface.
@@ -173,15 +178,36 @@ impl UnrealChannel for DefaultChannel {
         variable: VariableIndex,
         start: usize,
         count: usize,
-    ) -> Result<Vec<Variable>, ChannelError> {
+    ) -> Result<(Vec<Variable>, bool), ChannelError> {
         UnrealCommand::Variables(kind, frame, variable, start, count)
             .serialize(&mut self.sender)?;
 
         match self.next_response() {
-            Ok(UnrealResponse::Variables(vars)) => Ok(vars),
+            Ok(UnrealResponse::Variables(vars)) => Ok((vars, false)),
+            Ok(UnrealResponse::DeferredVariables(vars)) => Ok((vars, true)),
             Ok(_) => Err(ChannelError::ProtocolError),
             Err(e) => Err(e),
         }
+    }
+
+    fn go(&mut self) -> Result<(), ChannelError> {
+        UnrealCommand::Go.serialize(&mut self.sender)?;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<(), ChannelError> {
+        UnrealCommand::Next.serialize(&mut self.sender)?;
+        Ok(())
+    }
+
+    fn step_in(&mut self) -> Result<(), ChannelError> {
+        UnrealCommand::StepIn.serialize(&mut self.sender)?;
+        Ok(())
+    }
+
+    fn step_out(&mut self) -> Result<(), ChannelError> {
+        UnrealCommand::StepOut.serialize(&mut self.sender)?;
+        Ok(())
     }
 }
 

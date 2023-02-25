@@ -11,15 +11,20 @@ use std::{
 };
 
 use dap::{
-    events::{EventSend, ExitedEventBody, OutputEventBody, StoppedEventBody},
+    events::{
+        EventBody, EventSend, ExitedEventBody, InvalidatedEventBody, OutputEventBody,
+        StoppedEventBody,
+    },
     prelude::*,
     requests::{
-        AttachRequestArguments, InitializeArguments, ScopesArguments, SetBreakpointsArguments,
-        StackTraceArguments, VariablesArguments,
+        AttachRequestArguments, ContinueArguments, InitializeArguments, NextArguments,
+        ScopesArguments, SetBreakpointsArguments, StackTraceArguments, StepInArguments,
+        StepOutArguments, VariablesArguments,
     },
-    responses::{ErrorMessage, VariablesResponse},
+    responses::{ContinueResponse, ErrorMessage, VariablesResponse},
     types::{
-        Capabilities, OutputEventCategory, Scope, Source, StackFrame, StoppedEventReason, Thread,
+        Capabilities, InvalidatedAreas, OutputEventCategory, Scope, Source, StackFrame,
+        StoppedEventReason, Thread,
     },
 };
 use serde_json::{de::IoRead, Deserializer, Value};
@@ -49,6 +54,9 @@ pub struct UnrealscriptAdapter {
     one_based_lines: bool,
     // If true then we will send type information with variables.
     supports_variable_type: bool,
+    // If true then we'll send invalidated events when fetching variables that involves a stack
+    // change.
+    supports_invalidated_event: bool,
 }
 
 impl UnrealscriptAdapter {
@@ -59,6 +67,7 @@ impl UnrealscriptAdapter {
             event_thread: None,
             one_based_lines: true,
             supports_variable_type: false,
+            supports_invalidated_event: false,
         }
     }
 }
@@ -133,7 +142,11 @@ impl Adapter for UnrealscriptAdapter {
             }
             Command::StackTrace(args) => self.stack_trace(args),
             Command::Scopes(args) => self.scopes(args),
-            Command::Variables(args) => self.variables(args),
+            Command::Variables(args) => self.variables(args, ctx),
+            Command::Continue(args) => self.go(args),
+            Command::Next(args) => self.next(args),
+            Command::StepIn(args) => self.step_in(args),
+            Command::StepOut(args) => self.step_out(args),
             cmd => {
                 log::error!("Unhandled command: {cmd:#?}");
                 Err(UnrealscriptAdapterError::UnhandledCommandError(
@@ -157,13 +170,13 @@ impl UnrealscriptAdapter {
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         // If the client sends linesStartAt1: false then we need to adjust
         // all the line numbers we receive.
-        if let Some(false) = args.lines_start_at1 {
-            self.one_based_lines = false;
-        }
+        self.one_based_lines = args.lines_start_at1.unwrap_or(true);
 
-        if let Some(true) = args.supports_variable_type {
-            self.supports_variable_type = true;
-        }
+        // Remember if the client supports a type field for variables.
+        self.supports_variable_type = args.supports_variable_type.unwrap_or(false);
+
+        // Remember if the client supports invalidated events.
+        self.supports_invalidated_event = args.supports_invalidated_event.unwrap_or(false);
 
         Ok(ResponseBody::Initialize(Some(Capabilities {
             supports_configuration_done_request: Some(true),
@@ -467,6 +480,7 @@ impl UnrealscriptAdapter {
     fn variables(
         &mut self,
         args: &VariablesArguments,
+        ctx: &mut dyn Context,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         self.ensure_connected()?;
 
@@ -474,14 +488,8 @@ impl UnrealscriptAdapter {
             UnrealscriptAdapterError::LimitExceeded("Variable reference out of range".to_string()),
         )?;
 
-        if <FrameIndex as Into<u64>>::into(var.frame()) != 0 {
-            return Err(UnrealscriptAdapterError::UnhandledCommandError(
-                "can't handle other frames yet".to_string(),
-            ));
-        }
-
-        // TODO Handle filtering.
-        let vars =
+        // TODO Handle filtering?
+        let (vars, invalidated) =
             self.channel.as_mut().unwrap().variables(
                 var.kind(),
                 var.frame().try_into().unwrap(),
@@ -493,6 +501,28 @@ impl UnrealscriptAdapter {
                     UnrealscriptAdapterError::LimitExceeded("Count out of range".to_string()),
                 ))?,
             )?;
+
+        // If this response involved changing stacks and the client supports it, send an invalidated event
+        // This is useful for unreal because we don't have line information for anything except the
+        // top-most stack frame until we actually switch to that other frame. This event will
+        // instruct the client to refresh this single stack frame, which will allow us to provide a
+        // useful line number. This is not perfect: the client tries to switch to the source file
+        // and incorrect (0) line number before asking for the variables and before we send this
+        // event, so it will jump to the file but the wrong line the first time you switch to that
+        // stack frame. Clicking on it again will go to the correct line.
+        if invalidated && self.supports_invalidated_event {
+            log::trace!("Invalidating frame {}", var.frame());
+            ctx.send_event(Event {
+                body: EventBody::Invalidated(InvalidatedEventBody {
+                    areas: Some(vec![InvalidatedAreas::Stacks]),
+                    thread_id: None,
+                    stack_frame_id: Some(var.frame().into()),
+                }),
+            })
+            .or(Err(UnrealscriptAdapterError::CommunicationError(
+                ChannelError::ConnectionError,
+            )))?;
+        }
 
         Ok(ResponseBody::Variables(VariablesResponse {
             variables: vars
@@ -536,6 +566,40 @@ impl UnrealscriptAdapter {
                 })
                 .collect(),
         }))
+    }
+
+    fn go(&mut self, _args: &ContinueArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        self.ensure_connected()?;
+        self.channel.as_mut().unwrap().go()?;
+
+        Ok(ResponseBody::Continue(ContinueResponse {
+            all_threads_continued: Some(true),
+        }))
+    }
+
+    fn next(&mut self, _args: &NextArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        self.ensure_connected()?;
+        self.channel.as_mut().unwrap().next()?;
+
+        Ok(ResponseBody::Next)
+    }
+
+    fn step_in(
+        &mut self,
+        _args: &StepInArguments,
+    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        self.ensure_connected()?;
+        self.channel.as_mut().unwrap().step_in()?;
+        Ok(ResponseBody::StepIn)
+    }
+
+    fn step_out(
+        &mut self,
+        _args: &StepOutArguments,
+    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        self.ensure_connected()?;
+        self.channel.as_mut().unwrap().step_out()?;
+        Ok(ResponseBody::StepOut)
     }
 }
 
@@ -740,8 +804,24 @@ mod tests {
             _variable: VariableIndex,
             _start: usize,
             _count: usize,
-        ) -> Result<Vec<common::Variable>, ChannelError> {
-            Ok(vec![])
+        ) -> Result<(Vec<common::Variable>, bool), ChannelError> {
+            Ok((vec![], false))
+        }
+
+        fn go(&mut self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        fn next(&mut self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        fn step_in(&mut self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        fn step_out(&mut self) -> Result<(), ChannelError> {
+            Ok(())
         }
     }
 

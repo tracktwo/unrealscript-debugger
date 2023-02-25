@@ -26,11 +26,13 @@ pub struct OutOfRangeError;
 /// A valid frame index. Unreal does not impose a limit on the number of frames,
 /// and DAP has no practical limit (it uses a 'number' for them) but our variable
 /// encoding scheme allocates only 9 bits to a frame index.
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq)]
 pub struct FrameIndex(u16);
 
 impl FrameIndex {
     pub const MAX: u16 = 0x1FF;
+
+    pub const TOP_FRAME: FrameIndex = FrameIndex(0);
 
     pub fn create(val: i64) -> Result<Self, OutOfRangeError> {
         if val > Self::MAX.into() {
@@ -49,6 +51,12 @@ impl Into<usize> for FrameIndex {
 
 impl Into<u64> for FrameIndex {
     fn into(self) -> u64 {
+        self.0.into()
+    }
+}
+
+impl Into<i64> for FrameIndex {
+    fn into(self) -> i64 {
         self.0.into()
     }
 }
@@ -191,16 +199,28 @@ pub enum UnrealCommand {
     AddBreakpoint(Breakpoint),
     /// Remove a breakpoint
     RemoveBreakpoint(Breakpoint),
-    // Request the call stack - may request the full stack or only a subset.
+    /// Request the call stack - may request the full stack or only a subset.
     StackTrace(StackTraceRequest),
-    // Determine the number of watches of the given kind in the currently active
-    // frame.
+    /// Determine the number of watches of the given kind in the currently active
+    /// frame.
     WatchCount(WatchKind, VariableIndex),
-    // Retreive information about a particular frame.
+    /// Retreive information about a particular frame.
     Frame(FrameIndex),
-    // Retreive variables. This returns all children of a particular parent (either a scope or
-    // a structured variable).
+    /// Retreive variables. This returns all children of a particular parent (either a scope or
+    /// a structured variable).
     Variables(WatchKind, FrameIndex, VariableIndex, usize, usize),
+
+    /// Continue execution
+    Go,
+
+    /// Step over the next statement
+    Next,
+
+    // Step into the next statement
+    StepIn,
+
+    // Step out of the current function
+    StepOut,
 }
 
 /// Responses that can be sent from the debugger interface to the adapter, but only
@@ -212,6 +232,7 @@ pub enum UnrealResponse {
     StackTrace(StackTraceResponse),
     WatchCount(usize),
     Frame(Option<Frame>),
+    DeferredVariables(Vec<Variable>),
     Variables(Vec<Variable>),
 }
 

@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::Serializer;
 use std::ffi::{c_char, CStr};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Condvar;
 use std::{io, ptr};
 use std::{sync::Mutex, thread};
 use textcode::iso8859_1;
@@ -12,12 +13,14 @@ use thiserror::Error;
 use super::UnrealCallback;
 use super::DEBUGGER;
 use common::{
-    Breakpoint, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent, UnrealResponse,
-    Variable, VariableIndex,
+    Breakpoint, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent,
+    UnrealResponse, Variable, VariableIndex,
 };
 use common::{Frame, WatchKind, DEFAULT_PORT};
 
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
+
+static VARIABLE_REQUST_CONDVAR: Condvar = Condvar::new();
 
 /// A struct representing the debugger state.
 pub struct Debugger<W> {
@@ -32,6 +35,31 @@ pub struct Debugger<W> {
     saw_show_dll: bool,
     pending_break_event: bool,
     current_line: i32,
+
+    // The frame index for which we have received watch info. This is stored
+    // in DAP format, with 0 being the top-most frame, which is the _last_
+    // frame unreal gives us when building the call stack, but is the only frame
+    // it gives us watch info for.
+    current_frame: FrameIndex,
+
+    // If we had to switch frames to service a variable request we need to wait
+    // until Unreal provides the information before we can generate a response.
+    // This stores the current pending variables request so we can send the response
+    // when the data are available. There can be at most one pending variable request
+    // at any given time, which also means that while waiting for Unreal to finish
+    // processing we should not process any more messages from the adapter -- we need
+    // to wait for this to complete before taking other actions, especially one that
+    // could result in more variable requests.
+    pending_variable_request: Option<PendingVariableRequest>,
+}
+
+#[derive(Debug)]
+struct PendingVariableRequest {
+    kind: WatchKind,
+    frame: FrameIndex,
+    parent: VariableIndex,
+    start: usize,
+    count: usize,
 }
 
 /// A variable watch.
@@ -104,6 +132,8 @@ where
             saw_show_dll: false,
             pending_break_event: false,
             current_line: 0,
+            current_frame: FrameIndex::TOP_FRAME,
+            pending_variable_request: None,
         }
     }
 
@@ -173,50 +203,125 @@ where
                 log::trace!(
                     "Variable: {kind:?} frame={frame} parent={parent} start={start} count={count}"
                 );
-                // TODO Handle frames other than the first.
 
-                let list = self.get_watches(kind);
+                if frame != self.current_frame {
+                    // We should not be processing new commands while a variable request is
+                    // outstanding. This should never happen, but if it does return an empty
+                    // variables list -- hopefully we can recover.
+                    if self.pending_variable_request.is_some() {
+                        log::error!("Variable request for a different stack frame while a change is still pending!");
+                        self.send_response(&UnrealResponse::Variables(vec![]))?;
+                        return Ok(None);
+                    }
 
-                // A count of 0 means all elements.
-                let count = if count == 0 { usize::MAX } else { count };
+                    // We're looking for a variable not in the current stack frame, and we don't
+                    // have this info. This requires us to ask Unreal to switch frames and then
+                    // send the variable info when its available.
+                    let frame_id: usize = frame.into();
+                    if frame_id > self.callstack.len() {
+                        log::error!("Variable request stack frame {frame_id} is out of  range.");
+                        self.send_response(&UnrealResponse::Variables(vec![]))?;
+                        return Ok(None);
+                    }
 
-                let idx: usize = parent.into();
+                    self.pending_variable_request = Some(PendingVariableRequest {
+                        kind,
+                        frame,
+                        parent,
+                        start,
+                        count,
+                    });
 
-                // If the parent is out of range then we have nothing to return. Log an error and
-                // return an empty vector.
-                if idx >= list.len() {
-                    log::error!(
-                        "Variable: Parent index out of range. Got {idx} but size is {}",
-                        list.len()
-                    );
-                    self.send_response(&UnrealResponse::Variables(vec![]))?;
-                    return Ok(None);
+                    // Convert the frame index into the format unreal is expecting.
+                    // TODO Verify this is right!
+                    let str = format!("changestack {}", frame_id);
+                    log::trace!("handle_command: {str}");
+
+                    return Ok(Some(self.encode_string(&str)));
                 }
 
-                // Iterate the children of 'parent' according to the requested bounds and return
-                // a vector containing clones of the watches for these children.
-                let vars: Vec<Variable> = list[idx]
-                    .children
-                    .iter()
-                    .skip(start)
-                    .take(count)
-                    .map(|n| {
-                        let watch = &list[*n];
-                        Variable {
-                            name: watch.name.clone(),
-                            ty: watch.ty.clone(),
-                            value: watch.value.clone(),
-                            index: VariableIndex::create((*n).try_into().unwrap()).unwrap(),
-                            has_children: !watch.children.is_empty(),
-                            is_array: watch.is_array,
-                        }
-                    })
-                    .collect();
-
-                self.send_response(&UnrealResponse::Variables(vars))?;
+                self.send_variable_response(kind, parent, start, count, false)?;
                 Ok(None)
             }
+            UnrealCommand::Go => {
+                log::trace!("Go");
+                let str = "go";
+                Ok(Some(self.encode_string(&str)))
+            }
+            UnrealCommand::Next => {
+                log::trace!("Next");
+                let str = "stepover";
+                Ok(Some(self.encode_string(&str)))
+            }
+            UnrealCommand::StepIn => {
+                log::trace!("StepIn");
+                let str = "stepinto";
+                Ok(Some(self.encode_string(&str)))
+            }
+            UnrealCommand::StepOut => {
+                log::trace!("StepOut");
+                let str = "stepoutof";
+                Ok(Some(self.encode_string(&str)))
+            }
         }
+    }
+
+    /// Collect watch info and send a variable response with the variable data. This can be invoked
+    /// either directly in response to a variables command (if the current stack frame is the same
+    /// as the requested frame) or as a deferred response after Unreal switches frames if the
+    /// requested frame is different from the one we had when we got the command.
+    fn send_variable_response(
+        &mut self,
+        kind: WatchKind,
+        parent: VariableIndex,
+        start: usize,
+        count: usize,
+        deferred: bool,
+    ) -> Result<(), DebuggerError> {
+        let list = self.get_watches(kind);
+
+        // A count of 0 means all elements.
+        let count = if count == 0 { usize::MAX } else { count };
+
+        let idx: usize = parent.into();
+
+        // If the parent is out of range then we have nothing to return. Log an error and
+        // return an empty vector.
+        if idx >= list.len() {
+            log::error!(
+                "Variable: Parent index out of range. Got {idx} but size is {}",
+                list.len()
+            );
+            self.send_response(&UnrealResponse::Variables(vec![]))?;
+            return Ok(());
+        }
+
+        // Iterate the children of 'parent' according to the requested bounds and return
+        // a vector containing clones of the watches for these children.
+        let vars: Vec<Variable> = list[idx]
+            .children
+            .iter()
+            .skip(start)
+            .take(count)
+            .map(|n| {
+                let watch = &list[*n];
+                Variable {
+                    name: watch.name.clone(),
+                    ty: watch.ty.clone(),
+                    value: watch.value.clone(),
+                    index: VariableIndex::create((*n).try_into().unwrap()).unwrap(),
+                    has_children: !watch.children.is_empty(),
+                    is_array: watch.is_array,
+                }
+            })
+            .collect();
+
+        if deferred {
+            self.send_response(&UnrealResponse::DeferredVariables(vars))?;
+        } else {
+            self.send_response(&UnrealResponse::Variables(vars))?;
+        }
+        Ok(())
     }
 
     /// Send a response message. Since responses are always in reaction to a command, this requires
@@ -259,6 +364,7 @@ where
     ///  the game. So: just ignore the first call we see, and from then on treat any ShowDllForm
     ///  call as a break.
     pub fn show_dll_form(&mut self) -> () {
+        self.current_frame = FrameIndex::TOP_FRAME;
         if !self.saw_show_dll {
             // This was the first spurious call to show dll. Just remember we saw it but do
             // nothing, this is not a break. If we did launch with -autoDebug we'll get another
@@ -349,7 +455,24 @@ where
 
     pub fn lock_watchlist(&mut self) -> () {}
 
-    pub fn unlock_watchlist(&mut self) -> () {}
+    /// Unreal has unlocked a watchlist. We don't perform any locking of the watchlist but this
+    /// is the last signal we get after switching stack frames, so we can use this to complete
+    /// a pending variable request.
+    pub fn unlock_watchlist(&mut self) -> () {
+        if let Some(req) = self.pending_variable_request.take() {
+            // Update the current stack frame to represent the new state.
+            self.current_frame = req.frame;
+
+            // Send the response to the adapter so it can proceed.
+            self.send_variable_response(req.kind, req.parent, req.start, req.count, true)
+                .unwrap_or_else(|_| {
+                    log::error!("Failed to send response for deferred variable request");
+                });
+
+            // Signal the variable request condvar so we can unblock the command processing thread.
+            VARIABLE_REQUST_CONDVAR.notify_one();
+        }
+    }
 
     /// A breakpoint has been added.
     pub fn add_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
@@ -403,8 +526,7 @@ where
         // entry.
         if !self.callstack.is_empty() {
             let last = self.callstack.len() - 1;
-            // TODO Fixme
-            self.callstack[last].line = 66;
+            self.callstack[last].line = 0;
         }
         self.callstack.push(frame);
     }
@@ -465,7 +587,19 @@ where
 
     /// Set the current line.
     pub fn goto_line(&mut self, line: i32) -> () {
-        self.current_line = line;
+        // If we have a pending variable request then this is the line for our frame.
+        if let Some(var) = &self.pending_variable_request {
+            // Set the line number in the frame we are moving to.
+            let mut index: usize = self.callstack.len() - 1;
+            index -= <FrameIndex as Into<usize>>::into(var.frame);
+            log::trace!("Setting line number for frame {} to {}", index, line);
+            self.callstack[index].line = line;
+        } else {
+            // No pending variable request. This goto line is due to the debugger stopping,
+            // and the line is associated with whatever the last frame will be. Record this
+            // in the debugger object and the add stack frame calls will use it.
+            self.current_line = line;
+        }
     }
 
     /// Decompose an Unreal variable watch name into a name, type, and whether this
@@ -623,6 +757,17 @@ fn handle_connection(server: &mut TcpListener, cb: UnrealCallback) -> Result<(),
         let vec;
         {
             let mut hnd = DEBUGGER.lock().unwrap();
+            loop {
+                let dbg = hnd.as_mut().unwrap();
+                if dbg.pending_variable_request.is_some() {
+                    // There is still an outstanding variable request. We can't do anything until
+                    // this is finished.
+                    log::info!("Waiting for variable request to complete...");
+                    hnd = VARIABLE_REQUST_CONDVAR.wait(hnd).unwrap();
+                } else {
+                    break;
+                }
+            }
             let dbg = hnd.as_mut().unwrap();
             vec = dbg.handle_command(command?)?;
 
