@@ -55,3 +55,6 @@ fn frame_0_is_default() {
 
     fixture::wait_for_thread(handle);
 }
+
+// TODO Test switching stacks
+// TODO Test source roots.

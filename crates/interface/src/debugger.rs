@@ -517,7 +517,7 @@ where
         // entry or not, and the current line number is for the last entry. Set it
         // pre-emptively, and we'll clear it if and when we get another entry.
         let frame = Frame {
-            class_name: class_name.to_string(),
+            qualified_name: class_name.to_string(),
             function_name: function_name.to_string(),
             line: self.current_line,
         };
@@ -903,7 +903,7 @@ mod tests {
     fn add_frame() {
         let mut dbg = Debugger::<MockStream>::new();
         dbg.add_frame("Function MyPackage.Class:MyFunction\0".as_ptr() as *const i8);
-        assert_eq!(dbg.callstack[0].class_name, "MyPackage.Class");
+        assert_eq!(dbg.callstack[0].qualified_name, "MyPackage.Class");
         assert_eq!(dbg.callstack[0].function_name, "MyFunction");
     }
 
@@ -921,12 +921,12 @@ mod tests {
     fn with_stacktrace() {
         let mut dbg = Debugger::<MockStream>::new();
         dbg.callstack.push(Frame {
-            class_name: "Class1".to_string(),
+            qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
             line: 20,
         });
         dbg.callstack.push(Frame {
-            class_name: "Class2".to_string(),
+            qualified_name: "Class2".to_string(),
             function_name: "bar".to_string(),
             line: 84,
         });
@@ -938,12 +938,12 @@ mod tests {
             response.frames,
             vec![
                 Frame {
-                    class_name: "Class2".to_string(),
+                    qualified_name: "Class2".to_string(),
                     function_name: "bar".to_string(),
                     line: 84
                 },
                 Frame {
-                    class_name: "Class1".to_string(),
+                    qualified_name: "Class1".to_string(),
                     function_name: "foo".to_string(),
                     line: 20
                 },
@@ -955,12 +955,12 @@ mod tests {
     fn partial_stacktrace_start() {
         let mut dbg = Debugger::<MockStream>::new();
         dbg.callstack.push(Frame {
-            class_name: "Class1".to_string(),
+            qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
             line: 20,
         });
         dbg.callstack.push(Frame {
-            class_name: "Class2".to_string(),
+            qualified_name: "Class2".to_string(),
             function_name: "bar".to_string(),
             line: 84,
         });
@@ -971,7 +971,7 @@ mod tests {
         assert_eq!(
             response.frames,
             vec![Frame {
-                class_name: "Class2".to_string(),
+                qualified_name: "Class2".to_string(),
                 function_name: "bar".to_string(),
                 line: 84
             },]
@@ -982,12 +982,12 @@ mod tests {
     fn partial_stacktrace_end() {
         let mut dbg = Debugger::<MockStream>::new();
         dbg.callstack.push(Frame {
-            class_name: "Class1".to_string(),
+            qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
             line: 20,
         });
         dbg.callstack.push(Frame {
-            class_name: "Class2".to_string(),
+            qualified_name: "Class2".to_string(),
             function_name: "bar".to_string(),
             line: 84,
         });
@@ -998,7 +998,7 @@ mod tests {
         assert_eq!(
             response.frames,
             vec![Frame {
-                class_name: "Class1".to_string(),
+                qualified_name: "Class1".to_string(),
                 function_name: "foo".to_string(),
                 line: 20
             },]
@@ -1009,12 +1009,12 @@ mod tests {
     fn partial_stacktrace_beyond() {
         let mut dbg = Debugger::<MockStream>::new();
         dbg.callstack.push(Frame {
-            class_name: "Class1".to_string(),
+            qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
             line: 20,
         });
         dbg.callstack.push(Frame {
-            class_name: "Class2".to_string(),
+            qualified_name: "Class2".to_string(),
             function_name: "bar".to_string(),
             line: 84,
         });

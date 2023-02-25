@@ -150,7 +150,7 @@ pub struct StackTraceResponse {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Frame {
     pub function_name: String,
-    pub class_name: String,
+    pub qualified_name: String,
     pub line: i32,
 }
 

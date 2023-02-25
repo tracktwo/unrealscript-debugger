@@ -47,6 +47,7 @@ const UNREAL_UNEXPECTED_EXIT_CODE: i64 = 1;
 
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
+    source_roots: Vec<String>,
     channel: Option<Box<dyn UnrealChannel>>,
     event_thread: Option<JoinHandle<()>>,
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
@@ -63,6 +64,7 @@ impl UnrealscriptAdapter {
     pub fn new() -> UnrealscriptAdapter {
         UnrealscriptAdapter {
             class_map: BTreeMap::new(),
+            source_roots: vec![],
             channel: None,
             event_thread: None,
             one_based_lines: true,
@@ -294,7 +296,7 @@ impl UnrealscriptAdapter {
         }))
     }
 
-    // Extract the port number from an attach arguments value map.
+    // Extract the port number from a launch/attach arguments value map.
     fn extract_port(value: &Option<Value>) -> Option<u16> {
         value.as_ref()?["port"].as_i64()?.try_into().ok()
     }
@@ -312,6 +314,104 @@ impl UnrealscriptAdapter {
                 .filter(|e| e.is_string())
                 .map(|e| e.as_str().unwrap()),
         )
+    }
+
+    /// Extract the source roots list from the launch/attach arguments.
+    fn extract_source_roots(value: &Option<Value>) -> Option<Vec<String>> {
+        let arr = value.as_ref()?["sourceRoots"].as_array()?;
+        Some(
+            arr.iter()
+                .filter(|e| e.is_string())
+                .map(|e| e.as_str().unwrap().to_string())
+                .collect(),
+        )
+    }
+
+    /// Given a package and class name, search the provided source roots in order looking for the
+    /// first one that has a file that matches these names.
+    fn find_source_file(&mut self, package: &str, class: &str) -> Option<String> {
+        for root in &self.source_roots {
+            let path = Path::new(root);
+            if !path.exists() {
+                log::error!("Invalid source root: {root}");
+                continue;
+            }
+
+            log::info!("Searching source root {root} for {package}.{class}");
+
+            let candidate = path
+                .join(package)
+                .join("Classes")
+                .join(format!("{class}.uc"));
+            if !candidate.exists() {
+                continue;
+            }
+
+            let canonical = candidate
+                .canonicalize()
+                .or_else(|e| {
+                    log::error!("Failed to canonicalize path {candidate:#?}");
+                    Err(e)
+                })
+                .ok()?;
+
+            let path = canonical.to_str();
+            if !path.is_some() {
+                log::error!("Failed to stringize path {candidate:#?}");
+                return None;
+            }
+            let str = path.unwrap().to_string();
+            log::info!("Mapped {package}.{class} -> {str}");
+            return Some(str);
+        }
+
+        log::warn!("No source file found for {package}.{class}");
+        None
+    }
+
+    /// Given a source file that is not known to our class map, locate the correct location on
+    /// disk for that source, add it to the class map, and return a source entry for it.
+    /// the correct path.
+    fn translate_source(&mut self, canonical_name: String) -> Option<Source> {
+        // If this entry does not exist then we need to try to find it by searching source roots.
+        if !self.class_map.contains_key(&canonical_name) {
+            // This entry does not exist in our map, so try to locate the source file by searching
+            // the source roots.
+            let mut split = canonical_name.split(".");
+            let package = split.next().or_else(|| {
+                log::error!("Invalid class name {canonical_name}");
+                None
+            })?;
+            let class = split.next().or_else(|| {
+                log::error!("Invalid class name {canonical_name}");
+                None
+            })?;
+
+            // Find the real source file, or return if we can't.
+            let full_path = self.find_source_file(package, class)?;
+
+            // Put this entry in the map for later.
+            let class_info = ClassInfo {
+                file_name: full_path,
+                package_name: package.to_string(),
+                class_name: class.to_string(),
+                breakpoints: vec![],
+            };
+            self.class_map.insert(canonical_name.clone(), class_info);
+        }
+
+        // Find the entry: this should always succeed since we just added it if it wasn't there.
+        let entry = self.class_map.get(&canonical_name).unwrap();
+        Some(Source {
+            name: Some(entry.qualify()),
+            path: Some(entry.file_name.clone()),
+            source_reference: None,
+            presentation_hint: None,
+            origin: None,
+            sources: None,
+            adapter_data: None,
+            checksums: None,
+        })
     }
 
     /// Connect to the debugger interface. When connected this will send an 'initialized' event to
@@ -360,6 +460,10 @@ impl UnrealscriptAdapter {
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         log::info!("Attach request");
         let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
+        match Self::extract_source_roots(&args.other) {
+            Some(v) => self.source_roots = v,
+            _ => (),
+        };
         self.connect_to_interface(port, ctx)?;
         Ok(ResponseBody::Attach)
     }
@@ -373,6 +477,11 @@ impl UnrealscriptAdapter {
         let program = Self::extract_program(&args.other).ok_or(
             UnrealscriptAdapterError::InvalidProgram("No program provided".to_string()),
         )?;
+
+        match Self::extract_source_roots(&args.other) {
+            Some(v) => self.source_roots = v,
+            _ => (),
+        };
 
         let program_args = Self::extract_args(&args.other);
 
@@ -462,26 +571,14 @@ impl UnrealscriptAdapter {
                     .into_iter()
                     .enumerate()
                     .map(|(i, f)| {
-                        let canonical_name = f.class_name.to_uppercase();
-                        let mut source: Option<Source> = None;
-
-                        // TODO Handle source files we haven't seen in our map yet.
-                        if let Some(entry) = self.class_map.get(&canonical_name) {
-                            source = Some(Source {
-                                name: Some(entry.qualify()),
-                                path: Some(entry.file_name.clone()),
-                                source_reference: None,
-                                presentation_hint: None,
-                                origin: None,
-                                sources: None,
-                                adapter_data: None,
-                                checksums: None,
-                            });
-                        }
+                        let canonical_name = f.qualified_name.to_uppercase();
+                        // Find the source file for this class.
+                        let source = self.translate_source(canonical_name);
                         StackFrame {
                             // We'll use the index into the stack frame vector as the id
                             id: i as i64 + start_frame as i64,
-                            name: f.class_name,
+                            // TODO is this the right name to use?
+                            name: f.qualified_name,
                             source,
                             line: f.line as i64,
                             column: 0,
@@ -799,6 +896,7 @@ impl ClassInfo {
         format!("{}.{}", self.package_name, self.class_name)
     }
 
+    /// Convert to a DAP source entry.
     pub fn to_source(&self) -> Source {
         Source {
             name: Some(self.qualify()),
