@@ -7,6 +7,7 @@ use std::{
     net::TcpStream,
     num::TryFromIntError,
     path::{Component, Path},
+    process::Child,
     thread::JoinHandle,
 };
 
@@ -45,7 +46,7 @@ const UNREAL_THREAD_ID: i64 = 1;
 
 /// The exit code to send to the client when we've detected that the interface has shut down in
 /// some unexpected way.
-const UNREAL_UNEXPECTED_EXIT_CODE: i64 = 1;
+const UNREAL_UNEXPECTED_EXIT_CODE: i32 = 1;
 
 pub struct UnrealscriptAdapter {
     class_map: BTreeMap<String, ClassInfo>,
@@ -424,6 +425,7 @@ impl UnrealscriptAdapter {
         &mut self,
         port: u16,
         ctx: &mut dyn Context,
+        child: Option<Child>,
     ) -> Result<(), UnrealscriptAdapterError> {
         log::info!("Connecting to port {port}");
 
@@ -441,7 +443,7 @@ impl UnrealscriptAdapter {
         // The event receiving channel is spun out to a separate thread.
         let event_receiver = conn.1;
         self.event_thread = Some(std::thread::spawn(move || {
-            event_loop(event_sender, event_receiver)
+            event_loop(event_sender, event_receiver, child)
         }));
 
         // Now that we're connected we can tell the client that we're ready to receive breakpoint
@@ -468,7 +470,7 @@ impl UnrealscriptAdapter {
             Some(v) => self.source_roots = v,
             _ => (),
         };
-        self.connect_to_interface(port, ctx)?;
+        self.connect_to_interface(port, ctx, None)?;
         Ok(ResponseBody::Attach)
     }
 
@@ -516,18 +518,14 @@ impl UnrealscriptAdapter {
             program,
             command.get_args()
         );
-        // Spawn the process. We don't bother keeping the handle around: we don't support
-        // restarting, so to implement restart the client will just kill the existing adapter and
-        // spawn a new one. This will also kill the child process.
+
+        // Spawn the process.
         //
         // Note we must disconnect all streams (or we could pipe them elsewhere...). By
         // default in/out/err streams are inherited from the parent process, and we do _not_ want
-        // unreal writing to out stdout or reading from stdin since those are our communication
+        // unreal writing to stdout or reading from stdin since those are our communication
         // channel with the DAP client.
-        //
-        // TODO This is wrong: we should keep the handle and detect if the process has ended and
-        // use that to terminate the debugging process.
-        command
+        let child = command
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -540,7 +538,7 @@ impl UnrealscriptAdapter {
         // If we're auto-debugging we can now connect to the interface.
         if auto_debug {
             let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
-            self.connect_to_interface(port, ctx)?;
+            self.connect_to_interface(port, ctx, Some(child))?;
         }
 
         Ok(ResponseBody::Launch)
@@ -852,7 +850,11 @@ impl UnrealscriptAdapter {
 /// likely indicates a fatal error in the interface: if the debugger is stopped gracefully from the
 /// Unreal side we expect to receive a Disconnect event first. In this case we will send an
 /// 'exited' event with a non-zero code before returning.
-fn event_loop(sender: Box<dyn EventSend>, receiver: Deserializer<IoRead<TcpStream>>) -> () {
+fn event_loop(
+    sender: Box<dyn EventSend>,
+    receiver: Deserializer<IoRead<TcpStream>>,
+    child: Option<Child>,
+) -> () {
     for evt in receiver.into_iter::<UnrealEvent>() {
         let res = match evt {
             Ok(UnrealEvent::Log(msg)) => sender.send_event(events::Event {
@@ -902,16 +904,36 @@ fn event_loop(sender: Box<dyn EventSend>, receiver: Deserializer<IoRead<TcpStrea
         }
     }
 
+    log::info!("Event loop exited: Unreal stopped?");
+
     // The iterator is exhausted, which means we've lost the connection to the interface without
-    // receiving a 'Disconnect' event. This likely means something terrible has happened to Unreal.
-    // Send the adapter an "Exited" event with a non-zero exit code to indicate this and then
-    // stop. Again if this fails to send because the adapter is closing down too then we can just
-    // ignore the error.
+    // receiving a 'Disconnect' event. This likely means something terrible has happened to Unreal
+    // (or the user has just closed it). If we are in a launch configuration then we should be
+    // able to check the exit code of the child process.
+    //
+    // Send the adapter an "Exited" event, followed by a "terminated" event. If either of these
+    // fails to send because the adapter is closing down too then we can just ignore the error.
+
+    // Check if we have an exit code from the child process. We're not going to try too hard
+    // to get this, if it's not available just return a default code -- we're sending a terminated
+    // event so if we were launched the client is going to kill this process anyway so we don't
+    // need to worry too much about leaking.
+    let exit_code = child
+        .and_then(|mut c| c.try_wait().ok())
+        .flatten()
+        .and_then(|c| c.code())
+        .unwrap_or(UNREAL_UNEXPECTED_EXIT_CODE);
+
     sender
         .send_event(events::Event {
             body: events::EventBody::Exited(ExitedEventBody {
-                exit_code: UNREAL_UNEXPECTED_EXIT_CODE,
+                exit_code: exit_code.into(),
             }),
+        })
+        .ok();
+    sender
+        .send_event(events::Event {
+            body: events::EventBody::Terminated(None),
         })
         .ok();
 }
