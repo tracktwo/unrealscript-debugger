@@ -135,11 +135,13 @@ pub extern "C" fn LockList(_kind: i32) -> () {
 ///
 /// Called after Unreal has finished updating the watchlist of the given kind.
 #[no_mangle]
-pub extern "C" fn UnlockList(_kind: i32) -> () {
-    trace!("UnlockList {_kind}");
+pub extern "C" fn UnlockList(kind: i32) -> () {
+    trace!("UnlockList {kind}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
-    dbg.unlock_watchlist()
+    dbg.unlock_watchlist(
+        WatchKind::from_int(kind).expect("Unreal should never give us a bad watch kind."),
+    );
 }
 
 #[no_mangle]

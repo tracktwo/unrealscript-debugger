@@ -73,6 +73,21 @@ pub struct Watch {
     pub is_array: bool,
 }
 
+impl Watch {
+    /// Turn a watch into a variable to send to the adapter. Requires the index of
+    /// the watch.
+    fn to_variable(&self, index: usize) -> Variable {
+        Variable {
+            name: self.name.clone(),
+            ty: self.ty.clone(),
+            value: self.value.clone(),
+            index: VariableIndex::create((index).try_into().unwrap()).unwrap(),
+            has_children: !self.children.is_empty(),
+            is_array: self.is_array,
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum DebuggerError {
     #[error("Failed to initialize")]
@@ -233,7 +248,6 @@ where
                     });
 
                     // Convert the frame index into the format unreal is expecting.
-                    // TODO Verify this is right!
                     let str = format!("changestack {}", frame_id);
                     log::trace!("handle_command: {str}");
 
@@ -242,6 +256,41 @@ where
 
                 self.send_variable_response(kind, parent, start, count, false)?;
                 Ok(None)
+            }
+            UnrealCommand::Evaluate(expr) => {
+                let str = format!("addwatch {expr}");
+                log::trace!("handle_command: {str}");
+
+                // Check to see if we have a user watch already registered for this expression.
+                // Each user watch is registered as a root variable, so we only need to check
+                // children of the root.
+                if !self.user_watches.is_empty() {
+                    for idx in &self.user_watches[0].children {
+                        if self.user_watches[*idx].name == expr {
+                            self.send_response(&UnrealResponse::Evaluate(
+                                self.user_watches[*idx].to_variable(*idx),
+                            ))?;
+                            return Ok(None);
+                        }
+                    }
+                }
+
+                // No existing watch, so create one and register a pending variable request to
+                // wait for it to come in.
+                log::trace!("Registering pending request for new user watch {expr}");
+                self.pending_variable_request = Some(PendingVariableRequest {
+                    kind: WatchKind::User,
+                    frame: self.current_frame,
+                    parent: VariableIndex::SCOPE,
+                    start: 0,
+                    count: 0,
+                });
+                return Ok(Some(self.encode_string(&str)));
+            }
+            UnrealCommand::Pause => {
+                log::trace!("Pause");
+                let str = "break";
+                Ok(Some(self.encode_string(&str)))
             }
             UnrealCommand::Go => {
                 log::trace!("Go");
@@ -424,13 +473,14 @@ where
         let parent = if parent <= 0 { 0 } else { parent as usize };
 
         let (name, ty, is_array) = self.decompose_name(name);
+
         let watch = Watch {
             parent,
             name,
-            ty,
+            ty: ty.unwrap_or("<unknown type>".to_string()),
             value: self.decode_string(value),
             children: vec![],
-            is_array,
+            is_array: is_array.unwrap_or(false),
         };
         let vec = self.get_watches(kind);
 
@@ -458,19 +508,65 @@ where
     /// Unreal has unlocked a watchlist. We don't perform any locking of the watchlist but this
     /// is the last signal we get after switching stack frames, so we can use this to complete
     /// a pending variable request.
-    pub fn unlock_watchlist(&mut self) -> () {
-        if let Some(req) = self.pending_variable_request.take() {
-            // Update the current stack frame to represent the new state.
-            self.current_frame = req.frame;
+    pub fn unlock_watchlist(&mut self, kind: WatchKind) -> () {
+        match kind {
+            // The user watchlist is always unlocked last when dumping a frame, and also is locked
+            // and unlocked when registering a new user watch. Pending responses are sent only for
+            // this kind.
+            WatchKind::User => {
+                if let Some(req) = self.pending_variable_request.take() {
+                    // Update the current stack frame to represent the new state.
+                    self.current_frame = req.frame;
 
-            // Send the response to the adapter so it can proceed.
-            self.send_variable_response(req.kind, req.parent, req.start, req.count, true)
-                .unwrap_or_else(|_| {
-                    log::error!("Failed to send response for deferred variable request");
-                });
+                    // If this pending request is a user watch we want to send back an 'Evaluate'
+                    // reponse, otherwise we want to send a 'Variables' response.
+                    match req.kind {
+                        WatchKind::User => {
+                            // The new user watch will be the last one added to the user watchlist,
+                            // so it's the last child of the root.
+                            let var = if self.user_watches.is_empty()
+                                || self.user_watches[0].children.is_empty()
+                            {
+                                log::error!("User watchlist unlocked from a pending user watch but watchlist is empty!");
+                                // We still need to send back *something* or the adapter will be
+                                // stuck since it's waiting for an evaluate response.
+                                //
+                                // TODO: Better to send an error, and let the adapter display it.
+                                Variable {
+                                    name: "BAD VARIABLE".to_string(),
+                                    ty: "".to_string(),
+                                    value: "".to_string(),
+                                    index: VariableIndex::SCOPE,
+                                    is_array: false,
+                                    has_children: false,
+                                }
+                            } else {
+                                let idx = self.user_watches[0].children.last().unwrap();
+                                self.user_watches[*idx].to_variable(*idx)
+                            };
+                            self.send_response(&UnrealResponse::Evaluate(var))
+                                .unwrap_or_else(|_| {
+                                    log::error!("Failed to send response for user watch");
+                                });
+                        }
+                        _ => {
+                            // Send the response to the adapter so it can proceed.
+                            self.send_variable_response(
+                                req.kind, req.parent, req.start, req.count, true,
+                            )
+                            .unwrap_or_else(|_| {
+                                log::error!(
+                                    "Failed to send response for deferred variable request"
+                                );
+                            });
+                        }
+                    }
 
-            // Signal the variable request condvar so we can unblock the command processing thread.
-            VARIABLE_REQUST_CONDVAR.notify_one();
+                    // Signal the variable request condvar so we can unblock the command processing thread.
+                    VARIABLE_REQUST_CONDVAR.notify_one();
+                }
+            }
+            _ => (),
         }
     }
 
@@ -604,7 +700,7 @@ where
 
     /// Decompose an Unreal variable watch name into a name, type, and whether this
     /// type is an array.
-    fn decompose_name(&mut self, ptr: *const c_char) -> (String, String, bool) {
+    fn decompose_name(&mut self, ptr: *const c_char) -> (String, Option<String>, Option<bool>) {
         let str = iso8859_1::decode_to_string(make_cstr(ptr).to_bytes());
 
         // The name string is of the form "Name ( Ty,addr1,addr2 )".
@@ -625,23 +721,26 @@ where
                 // being treated as arrays as the type will be 'Object' or 'Struct', the actual
                 // name of the type does not appear here.
                 let is_array = ty.find("Array").is_some();
-                return (name.to_string(), ty.to_string(), is_array);
+                return (name.to_string(), Some(ty.to_string()), Some(is_array));
             }
         }
         // The name string is of the form '[[ Base Class ]]'
         else if let Some(_) = str.find("[[") {
-            return (str, "base class".to_string(), false);
+            return (str, Some("base class".to_string()), Some(false));
         }
         // The name string is of the form 'ParentName[idx]'
         // TODO: What about arrays of arrays?
         else if let Some(_) = str.find("[") {
-            return (str, "array element".to_string(), false);
+            return (str, Some("array element".to_string()), Some(false));
         }
 
-        // If we failed to parse the type just return the whole thing as the name and
-        // a default type.
-        log::error!("Failed to decompose watch name and type: {str}");
-        (str, "<unknown type>".to_string(), false)
+        // If we failed to parse the type just return the whole thing as the name but
+        // no type or array flag. This is not an error: user watches for invalid expressions
+        // are returned as the name but with no other info.
+        //
+        // Note: this makes it hard to distinguish a bad watch with a name like
+        // "Foo ( Type,addr,addr )" from a real successful user watch.
+        (str, None, None)
     }
 
     /// Decode an Unreal-encoded string to UTF-8.
@@ -1116,8 +1215,8 @@ mod tests {
         let str = "Location ( Struct,00007FF45D513A00,00007FF44F9B52F0 )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "Location");
-        assert_eq!(ty, "Struct");
-        assert_eq!(is_array, false);
+        assert_eq!(ty.unwrap(), "Struct");
+        assert_eq!(is_array.unwrap(), false);
     }
 
     #[test]
@@ -1126,8 +1225,8 @@ mod tests {
         let str = "CharacterStats ( Static Struct Array )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "CharacterStats");
-        assert_eq!(ty, "Static Struct Array");
-        assert_eq!(is_array, true);
+        assert_eq!(ty.unwrap(), "Static Struct Array");
+        assert_eq!(is_array.unwrap(), true);
     }
 
     #[test]
@@ -1136,8 +1235,8 @@ mod tests {
         let str = "AWCAbilities ( Array )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "AWCAbilities");
-        assert_eq!(ty, "Array");
-        assert_eq!(is_array, true);
+        assert_eq!(ty.unwrap(), "Array");
+        assert_eq!(is_array.unwrap(), true);
     }
 
     #[test]
@@ -1146,8 +1245,8 @@ mod tests {
         let str = "[[ Object ]]\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "[[ Object ]]");
-        assert_eq!(ty, "base class");
-        assert_eq!(is_array, false);
+        assert_eq!(ty.unwrap(), "base class");
+        assert_eq!(is_array.unwrap(), false);
     }
 
     #[test]
@@ -1156,7 +1255,7 @@ mod tests {
         let str = "SomeArray[0]\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "SomeArray[0]");
-        assert_eq!(ty, "array element");
-        assert_eq!(is_array, false);
+        assert_eq!(ty.unwrap(), "array element");
+        assert_eq!(is_array.unwrap(), false);
     }
 }

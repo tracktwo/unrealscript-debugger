@@ -66,7 +66,10 @@ pub trait UnrealChannel: Send + 'static {
         count: usize,
     ) -> Result<(Vec<Variable>, bool), ChannelError>;
 
+    fn evaluate(&mut self, expr: &str) -> Result<Variable, ChannelError>;
+
     fn go(&mut self) -> Result<(), ChannelError>;
+    fn pause(&mut self) -> Result<(), ChannelError>;
     fn next(&mut self) -> Result<(), ChannelError>;
     fn step_in(&mut self) -> Result<(), ChannelError>;
     fn step_out(&mut self) -> Result<(), ChannelError>;
@@ -174,6 +177,15 @@ impl UnrealChannel for DefaultChannel {
         }
     }
 
+    fn evaluate(&mut self, expr: &str) -> Result<Variable, ChannelError> {
+        UnrealCommand::Evaluate(expr.to_string()).serialize(&mut self.sender)?;
+        match self.next_response() {
+            Ok(UnrealResponse::Evaluate(val)) => Ok(val),
+            Ok(_) => Err(ChannelError::ProtocolError),
+            Err(e) => Err(e),
+        }
+    }
+
     fn variables(
         &mut self,
         kind: WatchKind,
@@ -191,6 +203,11 @@ impl UnrealChannel for DefaultChannel {
             Ok(_) => Err(ChannelError::ProtocolError),
             Err(e) => Err(e),
         }
+    }
+
+    fn pause(&mut self) -> Result<(), ChannelError> {
+        UnrealCommand::Pause.serialize(&mut self.sender)?;
+        Ok(())
     }
 
     fn go(&mut self) -> Result<(), ChannelError> {

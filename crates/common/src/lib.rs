@@ -210,6 +210,12 @@ pub enum UnrealCommand {
     /// a structured variable).
     Variables(WatchKind, FrameIndex, VariableIndex, usize, usize),
 
+    /// Evaluate a given variable expression
+    Evaluate(String),
+
+    /// Break as soon as possible
+    Pause,
+
     /// Continue execution
     Go,
 
@@ -234,6 +240,7 @@ pub enum UnrealResponse {
     Frame(Option<Frame>),
     DeferredVariables(Vec<Variable>),
     Variables(Vec<Variable>),
+    Evaluate(Variable),
 }
 
 /// Events that can be sent from the interface at any time.

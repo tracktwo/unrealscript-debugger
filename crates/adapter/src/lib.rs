@@ -17,11 +17,12 @@ use dap::{
     },
     prelude::*,
     requests::{
-        AttachRequestArguments, ContinueArguments, InitializeArguments, LaunchRequestArguments,
-        NextArguments, ScopesArguments, SetBreakpointsArguments, StackTraceArguments,
-        StepInArguments, StepOutArguments, VariablesArguments,
+        AttachRequestArguments, ContinueArguments, EvaluateArguments, InitializeArguments,
+        LaunchRequestArguments, NextArguments, PauseArguments, ScopesArguments,
+        SetBreakpointsArguments, StackTraceArguments, StepInArguments, StepOutArguments,
+        VariablesArguments,
     },
-    responses::{ContinueResponse, ErrorMessage, VariablesResponse},
+    responses::{ContinueResponse, ErrorMessage, EvaluateResponse, VariablesResponse},
     types::{
         Capabilities, InvalidatedAreas, OutputEventCategory, Scope, Source, StackFrame,
         StoppedEventReason, Thread,
@@ -33,7 +34,8 @@ use thiserror::Error;
 use variable_reference::VariableReference;
 
 use common::{
-    Breakpoint, FrameIndex, StackTraceRequest, UnrealEvent, VariableIndex, WatchKind, DEFAULT_PORT,
+    Breakpoint, FrameIndex, StackTraceRequest, UnrealEvent, Variable, VariableIndex, WatchKind,
+    DEFAULT_PORT,
 };
 
 use comm::{ChannelError, UnrealChannel};
@@ -150,6 +152,8 @@ impl Adapter for UnrealscriptAdapter {
             Command::StackTrace(args) => self.stack_trace(args),
             Command::Scopes(args) => self.scopes(args),
             Command::Variables(args) => self.variables(args, ctx),
+            Command::Evaluate(args) => self.evaluate(args),
+            Command::Pause(args) => self.pause(args),
             Command::Continue(args) => self.go(args),
             Command::Next(args) => self.next(args),
             Command::StepIn(args) => self.step_in(args),
@@ -671,6 +675,31 @@ impl UnrealscriptAdapter {
         }))
     }
 
+    fn evaluate(
+        &mut self,
+        args: &EvaluateArguments,
+    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        self.ensure_connected()?;
+
+        let var = self.channel.as_mut().unwrap().evaluate(&args.expression)?;
+        let child_count = self.get_child_count(WatchKind::User, &var);
+
+        Ok(ResponseBody::Evaluate(EvaluateResponse {
+            result: var.value,
+            type_field: Some(var.ty),
+            presentation_hint: None,
+            variables_reference: VariableReference::new(
+                WatchKind::User,
+                FrameIndex::TOP_FRAME,
+                var.index,
+            )
+            .to_int(),
+            named_variables: if !var.is_array { child_count } else { None },
+            indexed_variables: if var.is_array { child_count } else { None },
+            memory_reference: None,
+        }))
+    }
+
     /// Return the variables requested.
     fn variables(
         &mut self,
@@ -725,22 +754,7 @@ impl UnrealscriptAdapter {
                 .map(|v| {
                     // If this variable is structured get the child count so we can put it in
                     // the appropriate field of the response.
-                    let cnt = if v.has_children {
-                        self.channel
-                            .as_mut()
-                            .unwrap()
-                            .watch_count(var.kind(), v.index)
-                            .ok()
-                            .map(|c| {
-                                c.try_into().unwrap_or_else(|_| {
-                                    log::error!("Child count for var {} too large", v.name);
-                                    0
-                                })
-                            })
-                    } else {
-                        None
-                    };
-
+                    let cnt = self.get_child_count(var.kind(), v);
                     dap::types::Variable {
                         name: v.name.clone(),
                         value: v.value.clone(),
@@ -761,6 +775,32 @@ impl UnrealscriptAdapter {
                 })
                 .collect(),
         }))
+    }
+
+    fn get_child_count(&mut self, kind: WatchKind, var: &Variable) -> Option<i64> {
+        if var.has_children {
+            self.channel
+                .as_mut()
+                .unwrap()
+                .watch_count(kind, var.index)
+                .ok()
+                .map(|c| {
+                    c.try_into().unwrap_or_else(|_| {
+                        log::error!("Child count for var {} too large", var.name);
+                        0
+                    })
+                })
+        } else {
+            None
+        }
+    }
+
+    /// "Pause": Tell the debugger to break as soon as possible.
+    fn pause(&mut self, _args: &PauseArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        self.ensure_connected()?;
+        self.channel.as_mut().unwrap().pause()?;
+
+        Ok(ResponseBody::Pause)
     }
 
     fn go(&mut self, _args: &ContinueArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
@@ -1002,6 +1042,21 @@ mod tests {
             _count: usize,
         ) -> Result<(Vec<common::Variable>, bool), ChannelError> {
             Ok((vec![], false))
+        }
+
+        fn evaluate(&mut self, _expr: &str) -> Result<Variable, ChannelError> {
+            Ok(Variable {
+                name: "Var".to_string(),
+                ty: "type".to_string(),
+                value: "val".to_string(),
+                index: VariableIndex::create(1).unwrap(),
+                has_children: false,
+                is_array: false,
+            })
+        }
+
+        fn pause(&mut self) -> Result<(), ChannelError> {
+            Ok(())
         }
 
         fn go(&mut self) -> Result<(), ChannelError> {
