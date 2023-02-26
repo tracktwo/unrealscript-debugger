@@ -148,6 +148,7 @@ impl Adapter for UnrealscriptAdapter {
             Command::Attach(args) => self.attach(args, ctx),
             Command::Launch(args) => self.launch(args, ctx),
             Command::Disconnect(_args) => {
+                // TODO send a 'stopdebugging' command, and shut down our event loop.
                 return Ok(Response::make_ack(&request).expect("disconnect can be acked"))
             }
             Command::StackTrace(args) => self.stack_trace(args),
@@ -228,6 +229,8 @@ impl UnrealscriptAdapter {
         let class_info =
             ClassInfo::make(path.to_string()).or(Err(Error::InvalidFilename(path.to_string())))?;
         let mut qualified_class_name = class_info.qualify();
+
+        log::trace!("setting breakpoints for {qualified_class_name}");
         qualified_class_name.make_ascii_uppercase();
         let class_info = self
             .class_map
@@ -301,7 +304,7 @@ impl UnrealscriptAdapter {
         }))
     }
 
-    // Extract the port number from a launch/attach arguments value map.
+    /// Extract the port number from a launch/attach arguments value map.
     fn extract_port(value: &Option<Value>) -> Option<u16> {
         value.as_ref()?["port"].as_i64()?.try_into().ok()
     }
