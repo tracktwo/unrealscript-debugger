@@ -149,7 +149,7 @@ impl Adapter for UnrealscriptAdapter {
             Command::Launch(args) => self.launch(args, ctx),
             Command::Disconnect(_args) => {
                 // TODO send a 'stopdebugging' command, and shut down our event loop.
-                return Ok(Response::make_ack(&request).expect("disconnect can be acked"))
+                return Ok(Response::make_ack(&request).expect("disconnect can be acked"));
             }
             Command::StackTrace(args) => self.stack_trace(args),
             Command::Scopes(args) => self.scopes(args),
@@ -355,6 +355,7 @@ impl UnrealscriptAdapter {
                 continue;
             }
 
+            // TODO: Remove the \\? prefix if present.
             let canonical = candidate
                 .canonicalize()
                 .or_else(|e| {
@@ -398,11 +399,24 @@ impl UnrealscriptAdapter {
             // Find the real source file, or return if we can't.
             let full_path = self.find_source_file(package, class)?;
 
+            // Split the source back out from the obtained filename. Unreal will provide qualified
+            // names in all uppercase, but the full path we return will have the on-disk casing.
+            // Use that instead since it's 1) less screamy, and 2) consistent with the sources we
+            // will add when the first time we encounter a source is from a setBreakpoints request
+            // instead of in an unreal callstack since the client will also give us the filename in
+            // canonicalized case.
+            let (package, class) = split_source(&full_path).ok().or_else(|| {
+                log::error!(
+                    "Failed to split canonicalized source back into package and class: {full_path}"
+                );
+                None
+            })?;
+
             // Put this entry in the map for later.
             let class_info = ClassInfo {
                 file_name: full_path,
-                package_name: package.to_string(),
-                class_name: class.to_string(),
+                package_name: package,
+                class_name: class,
                 breakpoints: vec![],
             };
             self.class_map.insert(canonical_name.clone(), class_info);
@@ -588,11 +602,11 @@ impl UnrealscriptAdapter {
                         let canonical_name = f.qualified_name.to_uppercase();
                         // Find the source file for this class.
                         let source = self.translate_source(canonical_name);
+
                         StackFrame {
                             // We'll use the index into the stack frame vector as the id
                             id: i as i64 + start_frame as i64,
-                            // TODO is this the right name to use?
-                            name: f.qualified_name,
+                            name: f.function_name,
                             source,
                             line: f.line as i64,
                             column: 0,
