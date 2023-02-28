@@ -267,9 +267,9 @@ where
                 if !self.user_watches.is_empty() {
                     for idx in &self.user_watches[0].children {
                         if self.user_watches[*idx].name == expr {
-                            self.send_response(&UnrealResponse::Evaluate(
+                            self.send_response(&UnrealResponse::Evaluate(Some(
                                 self.user_watches[*idx].to_variable(*idx),
-                            ))?;
+                            )))?;
                             return Ok(None);
                         }
                     }
@@ -524,26 +524,14 @@ where
                         WatchKind::User => {
                             // The new user watch will be the last one added to the user watchlist,
                             // so it's the last child of the root.
-                            let var = if self.user_watches.is_empty()
-                                || self.user_watches[0].children.is_empty()
-                            {
+                            let var = self.user_watches.get(0).and_then(|n| {
+                                n.children
+                                    .last()
+                                    .and_then(|c| Some(self.user_watches[*c].to_variable(*c)))
+                            });
+                            if var.is_none() {
                                 log::error!("User watchlist unlocked from a pending user watch but watchlist is empty!");
-                                // We still need to send back *something* or the adapter will be
-                                // stuck since it's waiting for an evaluate response.
-                                //
-                                // TODO: Better to send an error, and let the adapter display it.
-                                Variable {
-                                    name: "BAD VARIABLE".to_string(),
-                                    ty: "".to_string(),
-                                    value: "".to_string(),
-                                    index: VariableIndex::SCOPE,
-                                    is_array: false,
-                                    has_children: false,
-                                }
-                            } else {
-                                let idx = self.user_watches[0].children.last().unwrap();
-                                self.user_watches[*idx].to_variable(*idx)
-                            };
+                            }
                             self.send_response(&UnrealResponse::Evaluate(var))
                                 .unwrap_or_else(|_| {
                                     log::error!("Failed to send response for user watch");

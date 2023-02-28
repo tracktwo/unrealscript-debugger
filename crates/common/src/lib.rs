@@ -240,7 +240,7 @@ pub enum UnrealResponse {
     Frame(Option<Frame>),
     DeferredVariables(Vec<Variable>),
     Variables(Vec<Variable>),
-    Evaluate(Variable),
+    Evaluate(Option<Variable>),
 }
 
 /// Events that can be sent from the interface at any time.

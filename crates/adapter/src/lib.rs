@@ -96,6 +96,9 @@ pub enum UnrealscriptAdapterError {
 
     #[error("Invalid program: {0}")]
     InvalidProgram(String),
+
+    #[error("Watch error: {0}")]
+    WatchError(String),
 }
 
 impl UnrealscriptAdapterError {
@@ -109,6 +112,7 @@ impl UnrealscriptAdapterError {
             UnrealscriptAdapterError::CommunicationError(_) => 4,
             UnrealscriptAdapterError::LimitExceeded(_) => 5,
             UnrealscriptAdapterError::InvalidProgram(_) => 6,
+            UnrealscriptAdapterError::WatchError(_) => 7,
         }
     }
 
@@ -697,6 +701,14 @@ impl UnrealscriptAdapter {
         self.ensure_connected()?;
 
         let var = self.channel.as_mut().unwrap().evaluate(&args.expression)?;
+
+        // We may get back a `None`, which means that something has gone wrong with evaluating this
+        // expression. This is not a typical error, passing an invalid expression will usually
+        // still provide a valid response with a value indicating that the expression can't be
+        // resolved. Send an error back to the client in this case.
+        let var = var.ok_or(UnrealscriptAdapterError::WatchError(
+            args.expression.clone(),
+        ))?;
         let child_count = self.get_child_count(WatchKind::User, &var);
 
         Ok(ResponseBody::Evaluate(EvaluateResponse {
@@ -1083,15 +1095,15 @@ mod tests {
             Ok((vec![], false))
         }
 
-        fn evaluate(&mut self, _expr: &str) -> Result<Variable, ChannelError> {
-            Ok(Variable {
+        fn evaluate(&mut self, _expr: &str) -> Result<Option<Variable>, ChannelError> {
+            Ok(Some(Variable {
                 name: "Var".to_string(),
                 ty: "type".to_string(),
                 value: "val".to_string(),
                 index: VariableIndex::create(1).unwrap(),
                 has_children: false,
                 is_array: false,
-            })
+            }))
         }
 
         fn pause(&mut self) -> Result<(), ChannelError> {
