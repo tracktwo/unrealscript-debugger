@@ -34,12 +34,7 @@ impl From<serde_json::Error> for ChannelError {
 }
 
 /// A representation for communications between the adapter and interface.
-///
-// TODO: Currently the adapter is sent across a thread boundary, and the adapter
-// holds the channel so this must be Send + 'static. This could be eliminated if
-// we restructure things so that the adapter can be constructed inside the thread
-// instead of being moved into it.
-pub trait UnrealChannel: Send + 'static {
+pub trait UnrealChannel {
     /// Add a breakpoint, receiving the verified breakpoint from unreal.
     fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError>;
 
