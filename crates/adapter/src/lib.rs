@@ -18,10 +18,10 @@ use dap::{
     },
     prelude::*,
     requests::{
-        AttachRequestArguments, ContinueArguments, EvaluateArguments, InitializeArguments,
-        LaunchRequestArguments, NextArguments, PauseArguments, ScopesArguments,
-        SetBreakpointsArguments, StackTraceArguments, StepInArguments, StepOutArguments,
-        VariablesArguments,
+        AttachRequestArguments, ContinueArguments, DisconnectArguments, EvaluateArguments,
+        InitializeArguments, LaunchRequestArguments, NextArguments, PauseArguments,
+        ScopesArguments, SetBreakpointsArguments, StackTraceArguments, StepInArguments,
+        StepOutArguments, VariablesArguments,
     },
     responses::{ContinueResponse, ErrorMessage, EvaluateResponse, VariablesResponse},
     types::{
@@ -151,10 +151,7 @@ impl Adapter for UnrealscriptAdapter {
             }
             Command::Attach(args) => self.attach(args, ctx),
             Command::Launch(args) => self.launch(args, ctx),
-            Command::Disconnect(_args) => {
-                // TODO send a 'stopdebugging' command, and shut down our event loop.
-                return Ok(Response::make_ack(&request).expect("disconnect can be acked"));
-            }
+            Command::Disconnect(args) => self.disconnect(args),
             Command::StackTrace(args) => self.stack_trace(args),
             Command::Scopes(args) => self.scopes(args),
             Command::Variables(args) => self.variables(args, ctx),
@@ -565,6 +562,18 @@ impl UnrealscriptAdapter {
         Ok(ResponseBody::Launch)
     }
 
+    fn disconnect(
+        &mut self,
+        _args: &DisconnectArguments,
+    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+        // TODO send a 'stopdebugging' command, and shut down our event loop.
+        self.ensure_connected()?;
+        self.channel.as_mut().unwrap().disconnect()?;
+        // Close the channel
+        self.channel.take();
+        return Ok(ResponseBody::Disconnect);
+    }
+
     /// Fetch the stack from the interface and send it to the client.
     fn stack_trace(
         &mut self,
@@ -739,7 +748,11 @@ impl UnrealscriptAdapter {
             UnrealscriptAdapterError::LimitExceeded("Variable reference out of range".to_string()),
         )?;
 
-        // TODO Handle filtering?
+        // Note: filtering is not implemented. In Unreal any given variable can have either named
+        // or indexed children, but not both. We will never send a variables/scopes response that
+        // has a non-zero count for both of these types, so we should also never receive a request
+        // for one of the types. Even if the client requested a particular filtering we would
+        // either send the whole list (if the filter matched) or nothing (if it didn't).
         let (vars, invalidated) =
             self.channel.as_mut().unwrap().variables(
                 var.kind(),
@@ -1123,6 +1136,10 @@ mod tests {
         }
 
         fn step_out(&mut self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        fn disconnect(&mut self) -> Result<(), ChannelError> {
             Ok(())
         }
     }

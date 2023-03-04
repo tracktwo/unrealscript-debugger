@@ -227,6 +227,9 @@ pub enum UnrealCommand {
 
     // Step out of the current function
     StepOut,
+
+    // Stop debugging - the client has disconnected.
+    Disconnect,
 }
 
 /// Responses that can be sent from the debugger interface to the adapter, but only

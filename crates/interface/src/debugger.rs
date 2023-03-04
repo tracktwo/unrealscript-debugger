@@ -1,26 +1,21 @@
-use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
 use ipmpsc::{Sender, SharedRingBuffer};
 use serde::Serialize;
 use serde_json::Serializer;
 use std::ffi::{c_char, CStr};
-use std::net::{TcpListener, TcpStream};
-use std::sync::Condvar;
+use std::net::TcpStream;
 use std::{io, ptr};
-use std::{sync::Mutex, thread};
 use textcode::iso8859_1;
 use thiserror::Error;
 
-use super::UnrealCallback;
-use super::DEBUGGER;
 use common::{
     Breakpoint, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent,
     UnrealResponse, Variable, VariableIndex,
 };
-use common::{Frame, WatchKind, DEFAULT_PORT};
+use common::{Frame, WatchKind};
 
-static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
+use crate::lifetime::VARIABLE_REQUST_CONDVAR;
 
-static VARIABLE_REQUST_CONDVAR: Condvar = Condvar::new();
+const MAGIC_DISCONNECT_STRING: &str = "Log: Detaching UnrealScript Debugger (currently detached)";
 
 /// A struct representing the debugger state.
 pub struct Debugger<W> {
@@ -30,6 +25,7 @@ pub struct Debugger<W> {
     user_watches: Vec<Watch>,
     callstack: Vec<Frame>,
     current_object_name: Option<String>,
+    stream: Option<TcpStream>,
     event_channel: Option<Serializer<W>>,
     response_channel: Option<Sender>,
     saw_show_dll: bool,
@@ -98,6 +94,40 @@ pub enum DebuggerError {
     NotConnected,
 }
 
+/// The action the debugger processing loop should take after resolving a command.
+///
+/// Some commands from the adapter require us to dispatch the command to unreal through
+/// the callback function. These will take some action on the same thread that calls
+/// through the callback, and for some commands these will immediately call back into
+/// the debugger interface through some other entry point, again on the same thread.
+///
+/// This means we cannot hold the debugger mutex across the command, so we can't
+/// safely call through the callback while holding the debugger mutex. This enum
+/// is used to pass information back to the event loop outside the debugger mutex
+/// that it can then dispatch to Unreal.
+///
+/// ### Examples
+///
+/// The 'StackTrace' command does not require communication with unreal, we already
+/// have the full stack information in the debugger object to prepare the response,
+/// so this command does not require any action so is represented by the 'Nothing'
+/// variant.
+///
+/// The 'AddBreakpoint' command requires us to tell Unreal to add the breakpoint,
+/// and this will immediately trigger a call to the 'AddBreakpoint' debugger
+/// interface API. This is represented by the 'Callback' variant where the string
+/// to pass to the callback (e.g. 'addbreakpoint <file> <line>') is part of the
+/// variant.
+///
+/// The 'StopDebugging' command tells Unreal to stop debugging. This requires a
+/// callback but is distinct from the 'Callback' variant because we also need to
+/// cleanly shut down the event processing loop before sending the command to unreal.
+pub enum CommandAction {
+    Nothing,
+    Callback(Vec<u8>),
+    StopDebugging,
+}
+
 impl From<serde_json::Error> for DebuggerError {
     fn from(value: serde_json::Error) -> Self {
         DebuggerError::SerializationError(value)
@@ -142,6 +172,7 @@ where
             }],
             callstack: Vec::new(),
             current_object_name: None,
+            stream: None,
             event_channel: None,
             response_channel: None,
             saw_show_dll: false,
@@ -172,24 +203,24 @@ where
     pub fn handle_command(
         &mut self,
         command: UnrealCommand,
-    ) -> Result<Option<Vec<u8>>, DebuggerError> {
+    ) -> Result<CommandAction, DebuggerError> {
         match command {
             UnrealCommand::Initialize(path) => {
                 log::trace!("handle_command: initialize");
                 let buf =
                     SharedRingBuffer::open(&path).or(Err(DebuggerError::InitializeFailure))?;
                 self.response_channel = Some(Sender::new(buf));
-                Ok(None)
+                Ok(CommandAction::Nothing)
             }
             UnrealCommand::AddBreakpoint(bp) => {
                 let str = format!("addbreakpoint {} {}", bp.qualified_name, bp.line);
                 log::trace!("handle_command: {str}");
-                Ok(Some(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(&str)))
             }
             UnrealCommand::RemoveBreakpoint(bp) => {
                 let str = format!("removebreakpoint {} {}", bp.qualified_name, bp.line);
                 log::trace!("handle_command: {str}");
-                Ok(Some(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(&str)))
             }
             UnrealCommand::StackTrace(stack) => {
                 // A stack trace request can be handled without talking to unreal: we
@@ -199,20 +230,20 @@ where
 
                 // This request has been completely handled, no need for the caller to invoke the
                 // callback.
-                Ok(None)
+                Ok(CommandAction::Nothing)
             }
             UnrealCommand::WatchCount(kind, parent) => {
                 log::trace!("WatchCount: {kind:?}");
                 let count = self.watch_count(kind, parent.into());
                 self.send_response(&UnrealResponse::WatchCount(count))?;
-                Ok(None)
+                Ok(CommandAction::Nothing)
             }
             UnrealCommand::Frame(idx) => {
                 log::trace!("Frame: {idx}");
                 let frame = self.callstack.iter().nth_back(idx.into());
                 log::trace!("The {idx}th frame is {frame:#?}");
                 self.send_response(&UnrealResponse::Frame(frame.cloned()))?;
-                Ok(None)
+                Ok(CommandAction::Nothing)
             }
             UnrealCommand::Variables(kind, frame, parent, start, count) => {
                 log::trace!(
@@ -226,7 +257,7 @@ where
                     if self.pending_variable_request.is_some() {
                         log::error!("Variable request for a different stack frame while a change is still pending!");
                         self.send_response(&UnrealResponse::Variables(vec![]))?;
-                        return Ok(None);
+                        return Ok(CommandAction::Nothing);
                     }
 
                     // We're looking for a variable not in the current stack frame, and we don't
@@ -236,7 +267,7 @@ where
                     if frame_id > self.callstack.len() {
                         log::error!("Variable request stack frame {frame_id} is out of  range.");
                         self.send_response(&UnrealResponse::Variables(vec![]))?;
-                        return Ok(None);
+                        return Ok(CommandAction::Nothing);
                     }
 
                     self.pending_variable_request = Some(PendingVariableRequest {
@@ -251,11 +282,11 @@ where
                     let str = format!("changestack {}", frame_id);
                     log::trace!("handle_command: {str}");
 
-                    return Ok(Some(self.encode_string(&str)));
+                    return Ok(CommandAction::Callback(self.encode_string(&str)));
                 }
 
                 self.send_variable_response(kind, parent, start, count, false)?;
-                Ok(None)
+                Ok(CommandAction::Nothing)
             }
             UnrealCommand::Evaluate(expr) => {
                 let str = format!("addwatch {expr}");
@@ -270,7 +301,7 @@ where
                             self.send_response(&UnrealResponse::Evaluate(Some(
                                 self.user_watches[*idx].to_variable(*idx),
                             )))?;
-                            return Ok(None);
+                            return Ok(CommandAction::Nothing);
                         }
                     }
                 }
@@ -285,34 +316,50 @@ where
                     start: 0,
                     count: 0,
                 });
-                return Ok(Some(self.encode_string(&str)));
+                return Ok(CommandAction::Callback(self.encode_string(&str)));
             }
             UnrealCommand::Pause => {
                 log::trace!("Pause");
                 let str = "break";
-                Ok(Some(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(&str)))
             }
             UnrealCommand::Go => {
                 log::trace!("Go");
                 let str = "go";
-                Ok(Some(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(&str)))
             }
             UnrealCommand::Next => {
                 log::trace!("Next");
                 let str = "stepover";
-                Ok(Some(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(&str)))
             }
             UnrealCommand::StepIn => {
                 log::trace!("StepIn");
                 let str = "stepinto";
-                Ok(Some(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(&str)))
             }
             UnrealCommand::StepOut => {
                 log::trace!("StepOut");
                 let str = "stepoutof";
-                Ok(Some(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(&str)))
+            }
+            UnrealCommand::Disconnect => {
+                log::trace!("Disconnect");
+                self.disconnect();
+                Ok(CommandAction::StopDebugging)
             }
         }
+    }
+
+    /// The adapter has requested we disconnect. This cleans up our internal
+    /// state for the debugging session -- no more messages can be sent or received
+    /// until a new session is established.
+    fn disconnect(&mut self) -> () {
+        // Drop our references to the communications channels. The main loop thread is still
+        // running but should receive a disconnect from the TCP socket soon and this will
+        // cause us to go back and wait for another connection.
+        self.event_channel.take();
+        self.response_channel.take();
     }
 
     /// Collect watch info and send a variable response with the variable data. This can be invoked
@@ -657,10 +704,30 @@ where
     /// A line has been added to the log. Send directly to the adapter (if connected).
     pub fn add_line_to_log(&mut self, text: *const c_char) -> () {
         let mut str = self.decode_string(text);
-        log::trace!("Add to log: {str}");
-        // Unreal does not add newlines to log messages, add one for readability.
-        str.push_str("\r\n");
+
+        // Unreal does not have a dedicated signal to tell us when things are
+        // shutting down. Instead we just get a log line of a particular format
+        // when the user uses \toggledebugging to disable debugging. When this
+        // happens we are about to be shut down.
+        if str == MAGIC_DISCONNECT_STRING {
+            log::info!("Received shutdown message.");
+
+            // Close the TCP stream and wait for the handle to complete.
+            self.stream.as_ref().and_then(|s| {
+                s.shutdown(std::net::Shutdown::Both).unwrap_or_else(|e| {
+                    log::error!("Failed to shut down TCP stream during shutdown: {e}.");
+                });
+                Some(())
+            });
+            // TODO Handle shutdown
+            return;
+        }
+
         if let Some(stream) = &mut self.event_channel {
+            log::trace!("Add to log: {str}");
+
+            // Unreal does not add newlines to log messages, add one for readability.
+            str.push_str("\r\n");
             if let Err(e) = UnrealEvent::Log(str).serialize(stream) {
                 log::error!("Sending log failed: {e}");
             }
@@ -684,6 +751,10 @@ where
             // in the debugger object and the add stack frame calls will use it.
             self.current_line = line;
         }
+    }
+
+    pub fn pending_variable_request(&self) -> bool {
+        self.pending_variable_request.is_some()
     }
 
     /// Decompose an Unreal variable watch name into a name, type, and whether this
@@ -749,7 +820,8 @@ impl Debugger<TcpStream> {
     /// A new connection has been established from the adapter. Record the tcp stream used to send
     /// events.
     pub fn new_connection(&mut self, stream: TcpStream) -> () {
-        self.event_channel = Some(serde_json::Serializer::new(stream));
+        self.event_channel = Some(serde_json::Serializer::new(stream.try_clone().unwrap()));
+        self.stream = Some(stream);
 
         // The debugger stopped before we connected (e.g. due to -autoDebug). Send a stopped
         // event to let it know about this.
@@ -759,115 +831,6 @@ impl Debugger<TcpStream> {
             self.show_dll_form();
         }
     }
-}
-
-/// Initialize the debugger instance. This should be called exactly once when
-/// Unreal first initializes us. Responsible for building the shared state object
-/// the other Unreal entry points will use and spawning the main loop thread
-/// that will perform I/O with the debugger adapter.
-pub fn initialize(cb: UnrealCallback) -> () {
-    if let Ok(dbg) = DEBUGGER.lock().as_mut() {
-        assert!(dbg.is_none(), "Initialize already called.");
-
-        // Start the logger. If this fails there isn't much we can do.
-        let _ = init_logger();
-
-        // Register a panic handler that will log to the log file, since our stdout/stderr
-        // are not connected to anything.
-        std::panic::set_hook(Box::new(|p| {
-            log::error!("Panic: {p:#?}");
-        }));
-
-        // Construct the debugger state.
-        dbg.replace(Debugger::new());
-
-        // Start the main loop that will listen for connections so we can
-        // communiate the debugger state to the adapter.
-        thread::spawn(move || main_loop(cb));
-    }
-}
-
-/// Initialize the logging interface.
-pub fn init_logger() -> Result<(), FlexiLoggerError> {
-    let mut logger = LOGGER.lock().unwrap();
-    assert!(logger.is_none(), "Already have a logger. Multiple inits?");
-    let new_logger = Logger::try_with_env_or_str("trace")?
-        .log_to_file(FileSpec::default().directory("DebuggerLogs"))
-        .start()?;
-    logger.replace(new_logger);
-    Ok(())
-}
-
-/// The main loop of the debugger interface. This runs in an independent thread from Unreal.
-///
-/// This thread will process incoming commands from the debugger adapter and dispatch them through
-/// the callback to unreal. This thread lives for the entire lifetime of the Unreal process with no
-/// mechanism to end it. The Unreal debugger interface API does not have a mechanism to shut down
-/// the interface, it'll just kill us when the process ends. This means this thread and loop may
-/// survive multiple debugging "sessions". The 'toggledebugger' unreal command can disable an
-/// active debugger and then another one can turn it back on again. This loop persists over those
-/// stattes, although we will disconnect any active adapter when we shut down.
-fn main_loop(cb: UnrealCallback) -> () {
-    // Start listening on a socket for connections from the adapter.
-    let mut server =
-        TcpListener::bind(format!("127.0.0.1:{DEFAULT_PORT}")).expect("Failed to bind port");
-
-    loop {
-        match handle_connection(&mut server, cb) {
-            Ok(_) => {}
-            Err(e) => {
-                log::error!("Error communicating with adapter: {e}");
-            }
-        }
-    }
-}
-
-/// Accept one connection from the debugger adapter and process commands from it until it
-/// disconects.
-///
-/// We accept only a single connection at a time, if multiple adapters attempt to connect
-/// we'll process them in sequence.
-fn handle_connection(server: &mut TcpListener, cb: UnrealCallback) -> Result<(), DebuggerError> {
-    let (stream, addr) = server.accept().or(Err(DebuggerError::InitializeFailure))?;
-    log::info!("Received connection from {addr}");
-
-    // Tell the debugger state we have a new connection for it to send events through.
-    {
-        let mut hnd = DEBUGGER.lock().unwrap();
-        let dbg = hnd.as_mut().unwrap();
-        dbg.new_connection(stream.try_clone().unwrap());
-    }
-
-    let mut deserializer =
-        serde_json::Deserializer::from_reader(stream).into_iter::<UnrealCommand>();
-    while let Some(command) = deserializer.next() {
-        let vec;
-        {
-            let mut hnd = DEBUGGER.lock().unwrap();
-            loop {
-                let dbg = hnd.as_mut().unwrap();
-                if dbg.pending_variable_request.is_some() {
-                    // There is still an outstanding variable request. We can't do anything until
-                    // this is finished.
-                    log::info!("Waiting for variable request to complete...");
-                    hnd = VARIABLE_REQUST_CONDVAR.wait(hnd).unwrap();
-                } else {
-                    break;
-                }
-            }
-            let dbg = hnd.as_mut().unwrap();
-            vec = dbg.handle_command(command?)?;
-
-            // We must drop the mutex on the debugger instance before invoking the callback.
-            // For certain callback commands Unreal will synchronously call back into us
-            // on the same thread and we will need to re-acquire the mutex at that point to
-            // process the response.
-        }
-        if let Some(vec) = vec {
-            (cb)(vec.as_ptr());
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug)]

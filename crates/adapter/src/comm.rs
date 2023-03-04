@@ -68,6 +68,7 @@ pub trait UnrealChannel {
     fn next(&mut self) -> Result<(), ChannelError>;
     fn step_in(&mut self) -> Result<(), ChannelError>;
     fn step_out(&mut self) -> Result<(), ChannelError>;
+    fn disconnect(&mut self) -> Result<(), ChannelError>;
 }
 
 /// The DefaultChannel uses two communications modes for talking to the debugger interface.
@@ -222,6 +223,11 @@ impl UnrealChannel for DefaultChannel {
 
     fn step_out(&mut self) -> Result<(), ChannelError> {
         UnrealCommand::StepOut.serialize(&mut self.sender)?;
+        Ok(())
+    }
+
+    fn disconnect(&mut self) -> Result<(), ChannelError> {
+        UnrealCommand::Disconnect.serialize(&mut self.sender)?;
         Ok(())
     }
 }
