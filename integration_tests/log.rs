@@ -20,7 +20,7 @@ fn simple_log() {
                 OutputEventCategory::Stdout
             ));
         }
-        _ => panic!("Expected an output event"),
+        b => panic!("Expected an output event but got {b:?}"),
     }
     fixture::wait_for_thread(handle);
 }

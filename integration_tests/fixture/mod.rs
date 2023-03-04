@@ -1,6 +1,6 @@
 use std::{
-    net::{TcpListener, TcpStream},
-    sync::mpsc::{self, Receiver, SendError, Sender},
+    net::TcpListener,
+    sync::mpsc::SendError,
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -20,7 +20,7 @@ use serde_json::{json, Map, Value};
 // end of the channel is returned as part of fixture setup and the event can be
 // received there.
 pub struct MockEventSender {
-    sender: Sender<Event>,
+    sender: std::sync::mpsc::Sender<Event>,
 }
 
 impl EventSend for MockEventSender {
@@ -76,19 +76,19 @@ pub fn setup<F>(
 ) -> (
     UnrealscriptAdapter,
     MockContext,
-    Receiver<Event>,
+    std::sync::mpsc::Receiver<Event>,
     JoinHandle<()>,
 )
 where
     F: FnOnce(
-            &mut Debugger<TcpStream>,
+            &mut Debugger,
             &mut dyn Iterator<Item = Result<UnrealCommand, serde_json::Error>>,
         ) -> ()
         + Send
         + 'static,
 {
     let mut adapter = UnrealscriptAdapter::new();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = std::sync::mpsc::channel();
     let event_sender = MockEventSender { sender };
     let mut context = MockContext { event_sender };
 
@@ -101,7 +101,8 @@ where
         let mut deserializer = serde_json::Deserializer::from_reader(stream.try_clone().unwrap())
             .into_iter::<UnrealCommand>();
 
-        dbg.new_connection(stream);
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        dbg.new_connection(tx);
 
         // First command should be an initialize
         let command = deserializer.next().unwrap().unwrap();

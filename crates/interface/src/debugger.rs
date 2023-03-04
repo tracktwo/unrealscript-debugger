@@ -1,11 +1,9 @@
-use ipmpsc::{Sender, SharedRingBuffer};
-use serde::Serialize;
-use serde_json::Serializer;
+use ipmpsc::SharedRingBuffer;
 use std::ffi::{c_char, CStr};
-use std::net::TcpStream;
-use std::{io, ptr};
+use std::ptr;
 use textcode::iso8859_1;
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 use common::{
     Breakpoint, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent,
@@ -18,16 +16,15 @@ use crate::lifetime::VARIABLE_REQUST_CONDVAR;
 const MAGIC_DISCONNECT_STRING: &str = "Log: Detaching UnrealScript Debugger (currently detached)";
 
 /// A struct representing the debugger state.
-pub struct Debugger<W> {
+pub struct Debugger {
     class_hierarchy: Vec<String>,
     local_watches: Vec<Watch>,
     global_watches: Vec<Watch>,
     user_watches: Vec<Watch>,
     callstack: Vec<Frame>,
     current_object_name: Option<String>,
-    stream: Option<TcpStream>,
-    event_channel: Option<Serializer<W>>,
-    response_channel: Option<Sender>,
+    event_channel: Option<tokio::sync::mpsc::Sender<UnrealEvent>>,
+    response_channel: Option<ipmpsc::Sender>,
     saw_show_dll: bool,
     pending_break_event: bool,
     current_line: i32,
@@ -88,8 +85,6 @@ impl Watch {
 pub enum DebuggerError {
     #[error("Failed to initialize")]
     InitializeFailure,
-    #[error("Serialization error: {0}")]
-    SerializationError(serde_json::Error),
     #[error("Not connected")]
     NotConnected,
 }
@@ -128,22 +123,13 @@ pub enum CommandAction {
     StopDebugging,
 }
 
-impl From<serde_json::Error> for DebuggerError {
-    fn from(value: serde_json::Error) -> Self {
-        DebuggerError::SerializationError(value)
-    }
-}
-
-impl<W> Debugger<W>
-where
-    W: io::Write,
-{
+impl Debugger {
     /// Construct a new debugger instance with an empty state. Note that the callback pointer is
     /// _not_ passed as an argument to the debugger instance. This is because the debugger instance
     /// cannot safely call through the callback as callback calls can immediately re-enter the
     /// interface on the same thread, which would require us to re-acquire the debugger mutex while
     /// we already hold it to perform the callback.
-    pub fn new() -> Debugger<W> {
+    pub fn new() -> Debugger {
         Debugger {
             class_hierarchy: Vec::new(),
             local_watches: vec![Watch {
@@ -172,7 +158,6 @@ where
             }],
             callstack: Vec::new(),
             current_object_name: None,
-            stream: None,
             event_channel: None,
             response_channel: None,
             saw_show_dll: false,
@@ -209,7 +194,7 @@ where
                 log::trace!("handle_command: initialize");
                 let buf =
                     SharedRingBuffer::open(&path).or(Err(DebuggerError::InitializeFailure))?;
-                self.response_channel = Some(Sender::new(buf));
+                self.response_channel = Some(ipmpsc::Sender::new(buf));
                 Ok(CommandAction::Nothing)
             }
             UnrealCommand::AddBreakpoint(bp) => {
@@ -455,10 +440,8 @@ where
     ///  clearing and setting the call stack.
     ///
     ///  We don't need to implement a complex state machine to track this, however, since we will
-    ///  only get this spurious ShowDllForm once during initialization, even in the -autoDebug case
-    ///  and even when the debugger is toggled off and on multiple times in a single execution of
-    ///  the game. So: just ignore the first call we see, and from then on treat any ShowDllForm
-    ///  call as a break.
+    ///  only get this spurious ShowDllForm once during initialization. So: just ignore the first
+    ///  call we see, and from then on treat any ShowDllForm call as a break.
     pub fn show_dll_form(&mut self) -> () {
         self.current_frame = FrameIndex::TOP_FRAME;
         if !self.saw_show_dll {
@@ -470,8 +453,8 @@ where
             // This is a true break. If we're connected send the Stopped event to the adapter. If
             // we're not connected yet set a flag indicating that we're stopped so we can tell
             // the adapter about this state when it does connect.
-            if let Some(stream) = &mut self.event_channel {
-                if let Err(e) = UnrealEvent::Stopped.serialize(stream) {
+            if let Some(channel) = &mut self.event_channel {
+                if let Err(e) = channel.blocking_send(UnrealEvent::Stopped) {
                     log::error!("Sending stopped event failed: {e}");
                 }
             } else {
@@ -712,23 +695,16 @@ where
         if str == MAGIC_DISCONNECT_STRING {
             log::info!("Received shutdown message.");
 
-            // Close the TCP stream and wait for the handle to complete.
-            self.stream.as_ref().and_then(|s| {
-                s.shutdown(std::net::Shutdown::Both).unwrap_or_else(|e| {
-                    log::error!("Failed to shut down TCP stream during shutdown: {e}.");
-                });
-                Some(())
-            });
             // TODO Handle shutdown
             return;
         }
 
-        if let Some(stream) = &mut self.event_channel {
+        if let Some(sender) = &mut self.event_channel {
             log::trace!("Add to log: {str}");
 
             // Unreal does not add newlines to log messages, add one for readability.
             str.push_str("\r\n");
-            if let Err(e) = UnrealEvent::Log(str).serialize(stream) {
+            if let Err(e) = sender.blocking_send(UnrealEvent::Log(str)) {
                 log::error!("Sending log failed: {e}");
             }
         } else {
@@ -814,14 +790,11 @@ where
         vec.push(0);
         vec
     }
-}
 
-impl Debugger<TcpStream> {
     /// A new connection has been established from the adapter. Record the tcp stream used to send
     /// events.
-    pub fn new_connection(&mut self, stream: TcpStream) -> () {
-        self.event_channel = Some(serde_json::Serializer::new(stream.try_clone().unwrap()));
-        self.stream = Some(stream);
+    pub fn new_connection(&mut self, tx: mpsc::Sender<UnrealEvent>) -> () {
+        self.event_channel = Some(tx);
 
         // The debugger stopped before we connected (e.g. due to -autoDebug). Send a stopped
         // event to let it know about this.
@@ -847,29 +820,12 @@ fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Deserializer;
-
     use super::*;
-
-    struct MockStream<'a> {
-        logs: &'a mut Vec<String>,
-    }
-
-    impl io::Write for MockStream<'_> {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.logs.push(String::from_utf8(buf.to_vec()).unwrap());
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 
     #[test]
     fn adding_to_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy[0], "Package.Class");
     }
@@ -877,7 +833,7 @@ mod tests {
     #[test]
     fn clearing_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy.len(), 1);
         dbg.clear_class_hierarchy();
@@ -888,7 +844,7 @@ mod tests {
     fn add_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 1);
         assert_eq!(dbg.local_watches.len(), 2);
         assert_eq!(dbg.global_watches.len(), 1);
@@ -907,7 +863,7 @@ mod tests {
     fn clear_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.add_watch(WatchKind::Local, -1, name, val);
         dbg.add_watch(WatchKind::Global, -1, name, val);
         dbg.add_watch(WatchKind::User, -1, name, val);
@@ -922,25 +878,19 @@ mod tests {
     fn add_watch_invalid_parent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.add_watch(WatchKind::Local, 1, name, val);
     }
 
     #[test]
     fn log_sends_line() {
-        let mut dbg = Debugger::<MockStream>::new();
-        let mut vec = Vec::new();
-        let mock_stream = MockStream { logs: &mut vec };
-        dbg.event_channel = Some(Serializer::new(mock_stream));
+        let mut dbg = Debugger::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        dbg.event_channel = Some(tx);
         let str = "This is a log line\0";
         dbg.add_line_to_log(str.as_ptr() as *const i8);
 
-        let concat = vec.iter().fold(String::new(), |mut x, y| {
-            x.push_str(y);
-            x
-        });
-        let deserializer = Deserializer::from_str(&concat);
-        let destr: UnrealEvent = deserializer.into_iter().next().unwrap().unwrap();
+        let destr: UnrealEvent = rx.blocking_recv().unwrap();
         match destr {
             // Compare the strings. Ignore the null byte in our sending string, and ignore the \r\n
             // appended to the log line in the event.
@@ -951,7 +901,7 @@ mod tests {
 
     #[test]
     fn add_frame() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.add_frame("Function MyPackage.Class:MyFunction\0".as_ptr() as *const i8);
         assert_eq!(dbg.callstack[0].qualified_name, "MyPackage.Class");
         assert_eq!(dbg.callstack[0].function_name, "MyFunction");
@@ -959,7 +909,7 @@ mod tests {
 
     #[test]
     fn empty_stacktrace() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         let response = dbg.handle_stacktrace_request(&StackTraceRequest {
             start_frame: 0,
             levels: 20,
@@ -969,7 +919,7 @@ mod tests {
 
     #[test]
     fn with_stacktrace() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
@@ -1003,7 +953,7 @@ mod tests {
 
     #[test]
     fn partial_stacktrace_start() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
@@ -1030,7 +980,7 @@ mod tests {
 
     #[test]
     fn partial_stacktrace_end() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
@@ -1057,7 +1007,7 @@ mod tests {
 
     #[test]
     fn partial_stacktrace_beyond() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
@@ -1077,7 +1027,7 @@ mod tests {
 
     #[test]
     fn empty_watch_count() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         assert_eq!(dbg.watch_count(WatchKind::Local, 0), 0);
         assert_eq!(dbg.watch_count(WatchKind::Global, 0), 0);
         assert_eq!(dbg.watch_count(WatchKind::User, 0), 0);
@@ -1085,7 +1035,7 @@ mod tests {
 
     #[test]
     fn local_watch_count() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.add_watch(
             WatchKind::Local,
             -1,
@@ -1106,7 +1056,7 @@ mod tests {
 
     #[test]
     fn global_watch_count() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.add_watch(
             WatchKind::Global,
             -1,
@@ -1126,7 +1076,7 @@ mod tests {
 
     #[test]
     fn watch_counts_roots_only() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         dbg.add_watch(
             WatchKind::Global,
             -1,
@@ -1162,7 +1112,7 @@ mod tests {
 
     #[test]
     fn simple_name() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         let str = "Location ( Struct,00007FF45D513A00,00007FF44F9B52F0 )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "Location");
@@ -1172,7 +1122,7 @@ mod tests {
 
     #[test]
     fn static_array_name() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         let str = "CharacterStats ( Static Struct Array )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "CharacterStats");
@@ -1182,7 +1132,7 @@ mod tests {
 
     #[test]
     fn dynamic_array_name() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         let str = "AWCAbilities ( Array )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "AWCAbilities");
@@ -1192,7 +1142,7 @@ mod tests {
 
     #[test]
     fn base_class_name() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         let str = "[[ Object ]]\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "[[ Object ]]");
@@ -1202,7 +1152,7 @@ mod tests {
 
     #[test]
     fn array_element_name() {
-        let mut dbg = Debugger::<MockStream>::new();
+        let mut dbg = Debugger::new();
         let str = "SomeArray[0]\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "SomeArray[0]");
