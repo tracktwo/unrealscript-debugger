@@ -120,7 +120,7 @@ impl Display for VariableIndex {
 }
 
 /// Representation of a breakpoint.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Breakpoint {
     pub qualified_name: String,
     pub line: i32,
@@ -135,17 +135,18 @@ impl Breakpoint {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct StackTraceRequest {
     pub start_frame: u32,
     pub levels: u32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StackTraceResponse {
     pub frames: Vec<Frame>,
 }
 
+// TODO Should this be clone?
 /// A callstack frame.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Frame {
@@ -191,7 +192,7 @@ pub struct Variable {
 }
 
 /// Commands that can be sent from the adapter to the debugger interface.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum UnrealCommand {
     /// Initialize a new connection with the given path as a shared memory file.
     Initialize(String),
@@ -234,7 +235,7 @@ pub enum UnrealCommand {
 
 /// Responses that can be sent from the debugger interface to the adapter, but only
 /// in a well-defined order in response to a command from the adapter.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum UnrealResponse {
     BreakpointAdded(Breakpoint),
     BreakpointRemoved(Breakpoint),
@@ -257,3 +258,13 @@ pub enum UnrealEvent {
     /// closes the game or uses `toggledebugger to disable debugging.
     Disconnect,
 }
+
+/// A message from the interface to the adapter. Can be either a 'response' or
+/// an 'event'. These are multiplexed into the same transport stream, but are
+/// split out by the adapter into separate channels for easier processing.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum UnrealInterfaceMessage {
+    Response(UnrealResponse),
+    Event(UnrealEvent),
+}
+

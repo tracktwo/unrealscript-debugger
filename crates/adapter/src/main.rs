@@ -1,10 +1,10 @@
-use std::io::BufReader;
-
-use adapter::UnrealscriptAdapter;
-use dap::prelude::*;
+use adapter::disconnected_adapter::DisconnectedAdapter;
 use flexi_logger::{Duplicate, FileSpec, Logger};
 
-fn main() {
+use adapter::async_client::AsyncClient;
+
+#[tokio::main]
+async fn main() {
     let _logger = Logger::try_with_env_or_str("trace")
         .unwrap()
         .log_to_file(FileSpec::default().directory("logs"))
@@ -17,14 +17,28 @@ fn main() {
         log::error!("Panic: {p:#?}");
     }));
 
-    let adapter = UnrealscriptAdapter::new();
-    let mut server = Server::new(adapter, std::io::stdout());
+    let client = AsyncClient::new(tokio::io::stdin(), tokio::io::stdout());
+    let mut adapter = DisconnectedAdapter::new(client);
 
     log::info!("Ready to start!");
-
-    let reader = BufReader::new(std::io::stdin());
-    server.run(reader).unwrap_or_else(|e| {
-        log::error!("Debugger failed with error {e}");
-        std::process::exit(1);
-    });
+    loop {
+        match adapter.connect().await {
+            Ok(mut connected) => {
+                log::info!("Connection established!");
+                match connected.process_messages().await {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        log::error!("Adapter exiting with error {e}");
+                        std::process::exit(1);
+                    }
+                };
+            }
+            Err(a) => {
+                // We failed to connect, or launched without attempting connection.
+                // If the former the client will just kill this process. If the
+                // latter then loop again and wait for an attach message.
+                adapter = a;
+            }
+        }
+    }
 }

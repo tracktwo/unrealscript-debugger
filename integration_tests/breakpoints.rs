@@ -33,7 +33,7 @@ fn hit_breakpoint() {
     // Set a breakpoint
     let response = adapter
         .accept(
-            Request {
+            &Request {
                 seq: 3,
                 command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
                     source: Source {
@@ -47,11 +47,10 @@ fn hit_breakpoint() {
                     ..Default::default()
                 }),
             },
-            &mut client,
         )
         .unwrap();
 
-    match response.body.unwrap() {
+    match response {
         ResponseBody::SetBreakpoints(_) => (),
         o => assert!(false, "Expected a setbreakpoints response: {o:#?}"),
     }
@@ -83,7 +82,7 @@ fn remove_breakpoint() {
     // Set a breakpoint
     let response = adapter
         .accept(
-            Request {
+            &Request {
                 seq: 3,
                 command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
                     source: Source {
@@ -97,11 +96,10 @@ fn remove_breakpoint() {
                     ..Default::default()
                 }),
             },
-            &mut client,
         )
         .unwrap();
 
-    match response.body.unwrap() {
+    match response {
         ResponseBody::SetBreakpoints(_) => (),
         _o => assert!(false, "Expected a setbreakpoints response: {_o:#?}"),
     }
@@ -109,7 +107,7 @@ fn remove_breakpoint() {
     // Set no breakpoints. This should generate a remove command to remove the first breakpoint.
     let response = adapter
         .accept(
-            Request {
+            &Request {
                 seq: 3,
                 command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
                     source: Source {
@@ -120,11 +118,10 @@ fn remove_breakpoint() {
                     ..Default::default()
                 }),
             },
-            &mut client,
         )
         .unwrap();
 
-    match response.body.unwrap() {
+    match response {
         ResponseBody::SetBreakpoints(_) => (),
         _o => assert!(false, "Expected a setbreakpoints response: {_o:#?}"),
     }

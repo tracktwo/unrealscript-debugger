@@ -1,13 +1,15 @@
-use std::{net::TcpStream, time::Duration};
+use std::time::Duration;
 
 use common::{
     Breakpoint, Frame, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand,
-    UnrealResponse, Variable, VariableIndex, WatchKind,
+    UnrealEvent, UnrealInterfaceMessage, UnrealResponse, Variable, VariableIndex, WatchKind,
 };
-use ipmpsc::{Receiver, SharedRingBuffer};
-use serde::Serialize;
-use serde_json::{de::IoRead, Deserializer, Serializer};
+use futures::SinkExt;
 use thiserror::Error;
+use tokio::{net::TcpStream, select, sync::mpsc, task::spawn_blocking};
+use tokio_serde::formats::Json;
+use tokio_stream::StreamExt;
+use tokio_util::codec::LengthDelimitedCodec;
 
 /// An error sending or receiving data across the channel.
 #[derive(Debug, Error)]
@@ -19,59 +21,21 @@ pub enum ChannelError {
     #[error("Connection error")]
     ConnectionError,
     /// A serialization or deserialization error.
-    #[error("Serialization error: {0}")]
-    SerializationError(serde_json::Error),
+    #[error("IO error: {0}")]
+    IoError(std::io::Error),
 
     /// Received an unexpected response.
     #[error("Protocol error")]
     ProtocolError,
 }
 
-impl From<serde_json::Error> for ChannelError {
-    fn from(value: serde_json::Error) -> Self {
-        ChannelError::SerializationError(value)
+impl From<std::io::Error> for ChannelError {
+    fn from(value: std::io::Error) -> Self {
+        ChannelError::IoError(value)
     }
 }
 
-/// A representation for communications between the adapter and interface.
-pub trait UnrealChannel {
-    /// Add a breakpoint, receiving the verified breakpoint from unreal.
-    fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError>;
-
-    // Remove a breakpoint, receiving the removed breakpoint from unreal.
-    fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError>;
-
-    fn stack_trace(&mut self, stack: StackTraceRequest)
-        -> Result<StackTraceResponse, ChannelError>;
-
-    fn watch_count(
-        &mut self,
-        kind: WatchKind,
-        parent: VariableIndex,
-    ) -> Result<usize, ChannelError>;
-
-    fn frame(&mut self, frame: FrameIndex) -> Result<Option<Frame>, ChannelError>;
-
-    fn variables(
-        &mut self,
-        kind: WatchKind,
-        frame: FrameIndex,
-        variable: VariableIndex,
-        start: usize,
-        count: usize,
-    ) -> Result<(Vec<Variable>, bool), ChannelError>;
-
-    fn evaluate(&mut self, expr: &str) -> Result<Option<Variable>, ChannelError>;
-
-    fn go(&mut self) -> Result<(), ChannelError>;
-    fn pause(&mut self) -> Result<(), ChannelError>;
-    fn next(&mut self) -> Result<(), ChannelError>;
-    fn step_in(&mut self) -> Result<(), ChannelError>;
-    fn step_out(&mut self) -> Result<(), ChannelError>;
-    fn disconnect(&mut self) -> Result<(), ChannelError>;
-}
-
-/// The DefaultChannel uses two communications modes for talking to the debugger interface.
+/// The UnrealChannel uses two communications modes for talking to the debugger interface.
 ///
 /// A TCP socket is used to send commands from the adapter to the interface. This socket
 /// can also receive asynchronous events from the interface to the adapter.
@@ -81,108 +45,105 @@ pub trait UnrealChannel {
 /// to commands, and some of the responses can be very large (e.g. watch data).
 ///
 /// This split model allows for a simpler communications scheme between the adapter and the
-/// interface:
-///
-///  - The adapter can spin up a thread responsible only for monitoring the TCP socket for
-///  asynchronous events. These can occur at any time in unpredictable orders.
-///  - Synchronous communication of command to one or more responses can be done on the adapter's
-///  main message processing thread.
-pub struct DefaultChannel {
-    response_receiver: Receiver,
-    sender: Serializer<TcpStream>,
+/// interface, since the order in which responses appear in the shared memory channel are
+/// predictable and no asynchronous events may appear in that communicaiton channel at
+/// unpredictable times. For example, when setting a breaking the code can rely on the
+/// breakpoint response appearing next in the response channel, even if asynchronous log
+/// events come in from Unreal at the same time.
+pub struct UnrealChannel {
+    response_receiver: mpsc::Receiver<UnrealResponse>,
+    event_receiver: mpsc::Receiver<UnrealEvent>,
+    command_sender: mpsc::Sender<UnrealCommand>,
 }
-
-/// The default size for the shared memory buffer.
-const SHARED_MEMORY_SIZE: u32 = 1024 * 1024 * 16;
-
-/// The timeout for receiving responses from the adapter
-const RECV_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The amount of time to wait for the connection to complete.
 const CONNECT_TIMEOUT: i32 = 30;
 
-impl DefaultChannel {
-    /// Fetch the next response from the channel.
-    ///
-    /// ### Errors:
-    ///   Returns a ChannelError::ConnectionError if the message channel encounters an error.
-    ///   Returns a ChannelError::Timeout if a message does not appear in a reasonable time.
-    fn next_response(&mut self) -> Result<UnrealResponse, ChannelError> {
-        self.response_receiver
-            .recv_timeout(RECV_TIMEOUT)
-            .or(Err(ChannelError::ConnectionError))?
-            .ok_or(ChannelError::Timeout)
-    }
+macro_rules! expect_response {
+    ($e:expr, $p:path) => {
+        match $e {
+            Some($p(x)) => Ok(x),
+            Some(_) => Err(ChannelError::ProtocolError),
+            None => Err(ChannelError::ConnectionError),
+        }
+    };
 }
-impl UnrealChannel for DefaultChannel {
-    fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
-        // Send the breakpoint to the interface
-        UnrealCommand::AddBreakpoint(bp).serialize(&mut self.sender)?;
 
-        // This should result in exactly one breakpoint response from the interface.
-        match self.next_response() {
-            Ok(UnrealResponse::BreakpointAdded(bp)) => Ok(bp),
-            Ok(_) => Err(ChannelError::ProtocolError),
-            Err(e) => Err(e),
+impl UnrealChannel {
+    pub fn new(
+        response_receiver: mpsc::Receiver<UnrealResponse>,
+        event_receiver: tokio::sync::mpsc::Receiver<UnrealEvent>,
+        command_sender: mpsc::Sender<UnrealCommand>,
+    ) -> Self {
+        Self {
+            response_receiver,
+            event_receiver,
+            command_sender,
         }
     }
 
-    fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
-        // Send the breakpoint removal to the interface
-        UnrealCommand::RemoveBreakpoint(bp).serialize(&mut self.sender)?;
+    /// Fetch the next response from the channel.
+    fn next_response(&mut self) -> Option<UnrealResponse> {
+        self.response_receiver.blocking_recv()
+    }
 
-        // This should result in exactly one breakpoint response from the interface.
-        match self.next_response() {
-            Ok(UnrealResponse::BreakpointRemoved(bp)) => Ok(bp),
-            Ok(_) => Err(ChannelError::ProtocolError),
-            Err(e) => Err(e),
-        }
+    /// Fetch the next event from the channel.
+    pub async fn next_event(&mut self) -> Option<UnrealEvent> {
+        self.event_receiver.recv().await
+    }
+
+    // TODO Are all these unwraps ok?
+    pub fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::AddBreakpoint(bp))
+            .unwrap();
+        expect_response!(self.next_response(), UnrealResponse::BreakpointAdded)
+    }
+
+    pub fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::RemoveBreakpoint(bp))
+            .unwrap();
+        expect_response!(self.next_response(), UnrealResponse::BreakpointRemoved)
     }
 
     /// Send a stack trace request across the channel and read the resulting stack frames.
-    fn stack_trace(&mut self, req: StackTraceRequest) -> Result<StackTraceResponse, ChannelError> {
-        UnrealCommand::StackTrace(req).serialize(&mut self.sender)?;
-
-        match self.next_response() {
-            Ok(UnrealResponse::StackTrace(stack)) => Ok(stack),
-            Ok(_) => Err(ChannelError::ProtocolError),
-            Err(e) => Err(e),
-        }
+    pub fn stack_trace(
+        &mut self,
+        req: StackTraceRequest,
+    ) -> Result<StackTraceResponse, ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::StackTrace(req))
+            .unwrap();
+        expect_response!(self.next_response(), UnrealResponse::StackTrace)
     }
 
-    fn watch_count(
+    pub fn watch_count(
         &mut self,
         kind: WatchKind,
         parent: VariableIndex,
     ) -> Result<usize, ChannelError> {
-        UnrealCommand::WatchCount(kind, parent).serialize(&mut self.sender)?;
-        match self.next_response() {
-            Ok(UnrealResponse::WatchCount(count)) => Ok(count),
-            Ok(_) => Err(ChannelError::ProtocolError),
-            Err(e) => Err(e),
-        }
+        self.command_sender
+            .blocking_send(UnrealCommand::WatchCount(kind, parent))
+            .unwrap();
+        expect_response!(self.next_response(), UnrealResponse::WatchCount)
     }
 
-    fn frame(&mut self, frame: FrameIndex) -> Result<Option<Frame>, ChannelError> {
-        UnrealCommand::Frame(frame).serialize(&mut self.sender)?;
-
-        match self.next_response() {
-            Ok(UnrealResponse::Frame(frame)) => Ok(frame),
-            Ok(_) => Err(ChannelError::ProtocolError),
-            Err(e) => Err(e),
-        }
+    pub fn frame(&mut self, frame: FrameIndex) -> Result<Option<Frame>, ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::Frame(frame))
+            .unwrap();
+        expect_response!(self.next_response(), UnrealResponse::Frame)
     }
 
-    fn evaluate(&mut self, expr: &str) -> Result<Option<Variable>, ChannelError> {
-        UnrealCommand::Evaluate(expr.to_string()).serialize(&mut self.sender)?;
-        match self.next_response() {
-            Ok(UnrealResponse::Evaluate(val)) => Ok(val),
-            Ok(_) => Err(ChannelError::ProtocolError),
-            Err(e) => Err(e),
-        }
+    pub fn evaluate(&mut self, expr: &str) -> Result<Option<Variable>, ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::Evaluate(expr.to_string()))
+            .unwrap();
+        expect_response!(self.next_response(), UnrealResponse::Evaluate)
     }
 
-    fn variables(
+    pub fn variables(
         &mut self,
         kind: WatchKind,
         frame: FrameIndex,
@@ -190,57 +151,73 @@ impl UnrealChannel for DefaultChannel {
         start: usize,
         count: usize,
     ) -> Result<(Vec<Variable>, bool), ChannelError> {
-        UnrealCommand::Variables(kind, frame, variable, start, count)
-            .serialize(&mut self.sender)?;
+        self.command_sender
+            .blocking_send(UnrealCommand::Variables(
+                kind, frame, variable, start, count,
+            ))
+            .unwrap();
 
+        // A variables response can result in one of two different message cases
+        // depending on whether the result was deferred or not.
         match self.next_response() {
-            Ok(UnrealResponse::Variables(vars)) => Ok((vars, false)),
-            Ok(UnrealResponse::DeferredVariables(vars)) => Ok((vars, true)),
-            Ok(_) => Err(ChannelError::ProtocolError),
-            Err(e) => Err(e),
+            Some(UnrealResponse::Variables(vars)) => Ok((vars, false)),
+            Some(UnrealResponse::DeferredVariables(vars)) => Ok((vars, true)),
+            Some(_) => Err(ChannelError::ProtocolError),
+            None => Err(ChannelError::ConnectionError),
         }
     }
 
-    fn pause(&mut self) -> Result<(), ChannelError> {
-        UnrealCommand::Pause.serialize(&mut self.sender)?;
+    // TODO This and below don't need to return result
+    pub fn pause(&mut self) -> Result<(), ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::Pause)
+            .unwrap();
         Ok(())
     }
 
-    fn go(&mut self) -> Result<(), ChannelError> {
-        UnrealCommand::Go.serialize(&mut self.sender)?;
+    pub fn go(&mut self) -> Result<(), ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::Go)
+            .unwrap();
         Ok(())
     }
 
-    fn next(&mut self) -> Result<(), ChannelError> {
-        UnrealCommand::Next.serialize(&mut self.sender)?;
+    pub fn next(&mut self) -> Result<(), ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::Next)
+            .unwrap();
         Ok(())
     }
 
-    fn step_in(&mut self) -> Result<(), ChannelError> {
-        UnrealCommand::StepIn.serialize(&mut self.sender)?;
+    pub fn step_in(&mut self) -> Result<(), ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::StepIn)
+            .unwrap();
         Ok(())
     }
 
-    fn step_out(&mut self) -> Result<(), ChannelError> {
-        UnrealCommand::StepOut.serialize(&mut self.sender)?;
+    pub fn step_out(&mut self) -> Result<(), ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::StepOut)
+            .unwrap();
         Ok(())
     }
 
-    fn disconnect(&mut self) -> Result<(), ChannelError> {
-        UnrealCommand::Disconnect.serialize(&mut self.sender)?;
+    pub fn disconnect(&mut self) -> Result<(), ChannelError> {
+        self.command_sender
+            .blocking_send(UnrealCommand::Disconnect)
+            .unwrap();
         Ok(())
     }
 }
 
 /// Connect to an unreal debugger adapter running at the given port number on the local computer.
-pub fn connect(
-    port: u16,
-) -> Result<(Box<dyn UnrealChannel>, Deserializer<IoRead<TcpStream>>), ChannelError> {
+pub async fn connect(port: u16) -> Result<UnrealChannel, ChannelError> {
     let mut tcp: Option<TcpStream> = None;
 
     // Try to connect, sleeping between attempts.
     for _ in 0..CONNECT_TIMEOUT {
-        match TcpStream::connect(format!("127.0.0.1:{port}")) {
+        match TcpStream::connect(format!("127.0.0.1:{port}")).await {
             Ok(s) => {
                 tcp = Some(s);
                 break;
@@ -254,19 +231,98 @@ pub fn connect(
     // If we failed to connect we can't go any further.
     let tcp = tcp.ok_or(ChannelError::ConnectionError)?;
 
-    let (path, shmem) =
-        SharedRingBuffer::create_temp(SHARED_MEMORY_SIZE).or(Err(ChannelError::ConnectionError))?;
+    // Create channels to manage sending commands to and receiving events from the
+    // interface TCP connection.
+    let (ctx, crx) = mpsc::channel(128);
+    let (etx, erx) = mpsc::channel(128);
+    let (rtx, rrx) = mpsc::channel(128);
 
-    // Send the path of the shared memory buffer to the interface.
-    let mut serializer = Serializer::new(tcp.try_clone().or(Err(ChannelError::ConnectionError))?);
-    UnrealCommand::Initialize(path).serialize(&mut serializer)?;
+    // Spawn a new task to manage these channels and the TCP connection.
+    tokio::spawn(async { debuggee_tcp_loop(tcp, rtx, etx, crx).await });
+    Ok(UnrealChannel {
+        response_receiver: rrx,
+        event_receiver: erx,
+        command_sender: ctx,
+    })
+}
 
-    let deserializer = serde_json::Deserializer::from_reader(tcp);
-    Ok((
-        Box::new(DefaultChannel {
-            response_receiver: Receiver::new(shmem),
-            sender: serializer,
-        }),
-        deserializer,
-    ))
+/// Task for managing a TCP connection to the debugger interface.
+///
+/// This is intended to be spawned as an independent task which will coordinate
+/// communication between the interface's socket and the main debugger adapter.
+/// This communication is done via channels.
+async fn debuggee_tcp_loop(
+    tcp: TcpStream,
+    response_sender: mpsc::Sender<UnrealResponse>,
+    event_sender: mpsc::Sender<UnrealEvent>,
+    mut command_receiver: mpsc::Receiver<UnrealCommand>,
+) {
+    // Adapt the tcp socket into an asymmetrical source + sink for Json objects.
+    // Across this TCP socket we will send UnrealCommands to the interface, and
+    // receive UnrealEvents from that interface. These will always be length-delimited.
+
+    // Construct a frame codec using length-delimited fields.
+    let frame = tokio_util::codec::Framed::new(tcp, LengthDelimitedCodec::new());
+
+    // Build a json formatter that can deserialize events and serialize commands.
+    let format: Json<UnrealInterfaceMessage, UnrealCommand> = Json::default();
+
+    // Build a source + sink for that Json format on top of our framing system.
+    let mut tcp_stream = tokio_serde::Framed::new(frame, format);
+
+    loop {
+        select! {
+            event = tcp_stream.next() => {
+                match event {
+                    Some(Ok(UnrealInterfaceMessage::Event(event))) => {
+                        // We've received an event from the interface. Send it along to the
+                        // adapter.
+                        event_sender.send(event).await.unwrap();
+                    },
+                    Some(Ok(UnrealInterfaceMessage::Response(resp))) => {
+                        // We've received an event from the interface. Send it along to the
+                        // adapter.
+                        response_sender.send(resp).await.unwrap();
+                    },
+                    Some(Err(e)) => {
+                        // An error has occurred.
+                        log::error!("Error receiving event from interface: {e}");
+                        return;
+                    }
+                    None => {
+                        // The connection has closed. If this was a graceful shutdown
+                        // we should have received a shutdown event first and dispatched
+                        // it to the adapter. Or, perhaps Unreal has crashed.
+                        log::info!("Connection closed from interface.");
+                        return;
+                    }
+                };
+            }
+            command = command_receiver.recv() => {
+                match command {
+                    Some(command) => {
+                        // We've received a command from the adapter. Send it to the
+                        // interface. When this happens we'll log the error and return,
+                        // which will drop the sending portions of the response and event
+                        // channels that we own. This will be detected either by the
+                        // main adapter loop.
+                        match tcp_stream.send(command).await {
+                            Ok(()) => {},
+                            Err(e) => {
+                                log::error!("IO error sending command to Unreal: {e}");
+                                return;
+                            }
+                        } ;
+                    },
+                    None => {
+                        // The adapter has dropped the sending part of this stream.
+                        // TODO: We should cancel this task before dropping the adapter, then
+                        // this can't happen.
+                        log::error!("End of stream reading from the command channel.");
+                        return;
+                    }
+                }
+            }
+        }
+    }
 }

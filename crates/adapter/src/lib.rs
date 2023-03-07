@@ -1,42 +1,39 @@
-mod comm;
-
+pub mod async_client;
+pub mod comm;
+pub mod disconnected_adapter;
 pub mod variable_reference;
 
 use std::{
     collections::BTreeMap,
-    net::TcpStream,
     num::TryFromIntError,
     path::{Component, Path},
-    process::Child,
-    thread::JoinHandle,
 };
 
+use async_client::AsyncClient;
 use dap::{
-    events::{
-        EventBody, EventSend, ExitedEventBody, InvalidatedEventBody, OutputEventBody,
-        StoppedEventBody,
-    },
+    events::{EventBody, InvalidatedEventBody, OutputEventBody, StoppedEventBody},
     prelude::*,
     requests::{
-        AttachRequestArguments, ContinueArguments, DisconnectArguments, EvaluateArguments,
-        InitializeArguments, LaunchRequestArguments, NextArguments, PauseArguments,
+        ContinueArguments, DisconnectArguments, EvaluateArguments, NextArguments, PauseArguments,
         ScopesArguments, SetBreakpointsArguments, StackTraceArguments, StepInArguments,
         StepOutArguments, VariablesArguments,
     },
     responses::{ContinueResponse, ErrorMessage, EvaluateResponse, VariablesResponse},
     types::{
-        Capabilities, InvalidatedAreas, OutputEventCategory, Scope, Source, StackFrame,
-        StoppedEventReason, Thread,
+        InvalidatedAreas, OutputEventCategory, Scope, Source, StackFrame, StoppedEventReason,
+        Thread,
     },
 };
-use serde_json::{de::IoRead, Deserializer, Value};
 use std::fmt::Debug;
 use thiserror::Error;
+use tokio::{
+    select,
+    sync::{broadcast, mpsc},
+};
 use variable_reference::VariableReference;
 
 use common::{
     Breakpoint, FrameIndex, StackTraceRequest, UnrealEvent, Variable, VariableIndex, WatchKind,
-    DEFAULT_PORT,
 };
 
 use comm::{ChannelError, UnrealChannel};
@@ -44,15 +41,10 @@ use comm::{ChannelError, UnrealChannel};
 /// The thread ID to use for the unrealscript thread. The unreal debugger only supports one thread.
 const UNREAL_THREAD_ID: i64 = 1;
 
-/// The exit code to send to the client when we've detected that the interface has shut down in
-/// some unexpected way.
-const UNREAL_UNEXPECTED_EXIT_CODE: i32 = 1;
-
-pub struct UnrealscriptAdapter {
-    class_map: BTreeMap<String, ClassInfo>,
-    source_roots: Vec<String>,
-    channel: Option<Box<dyn UnrealChannel>>,
-    event_thread: Option<JoinHandle<()>>,
+/// A representation of the client configuration options. These will impact how
+/// we send responses.
+#[derive(Default, Debug)]
+pub struct ClientConfig {
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
     one_based_lines: bool,
@@ -61,26 +53,28 @@ pub struct UnrealscriptAdapter {
     // If true then we'll send invalidated events when fetching variables that involves a stack
     // change.
     supports_invalidated_event: bool,
+    source_roots: Vec<String>,
 }
 
-impl UnrealscriptAdapter {
-    pub fn new() -> UnrealscriptAdapter {
-        UnrealscriptAdapter {
-            class_map: BTreeMap::new(),
-            source_roots: vec![],
-            channel: None,
-            event_thread: None,
-            one_based_lines: true,
-            supports_variable_type: false,
-            supports_invalidated_event: false,
-        }
-    }
+/// A connected Unrealscript debug adapter.
+pub struct UnrealscriptAdapter {
+    client: AsyncClient,
+    config: ClientConfig,
+    channel: UnrealChannel,
+    class_map: BTreeMap<String, ClassInfo>,
+    control: Option<broadcast::Sender<ControlMessage>>,
+    events: Option<mpsc::Sender<Event>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ControlMessage {
+    Shutdown,
 }
 
 #[derive(Error, Debug)]
 pub enum UnrealscriptAdapterError {
     #[error("Unhandled command: {0}")]
-    UnhandledCommandError(String),
+    UnhandledCommand(String),
 
     #[error("Invalid filename: {0}")]
     InvalidFilename(String),
@@ -106,7 +100,7 @@ impl UnrealscriptAdapterError {
     /// responses to uniquely identify messages.
     fn id(&self) -> i64 {
         match self {
-            UnrealscriptAdapterError::UnhandledCommandError(_) => 1,
+            UnrealscriptAdapterError::UnhandledCommand(_) => 1,
             UnrealscriptAdapterError::InvalidFilename(_) => 2,
             UnrealscriptAdapterError::NotConnected => 3,
             UnrealscriptAdapterError::CommunicationError(_) => 4,
@@ -136,25 +130,136 @@ impl From<ChannelError> for UnrealscriptAdapterError {
 
 type Error = UnrealscriptAdapterError;
 
-impl Adapter for UnrealscriptAdapter {
-    type Error = UnrealscriptAdapterError;
+impl UnrealscriptAdapter {
+    pub fn new(
+        client: AsyncClient,
+        config: ClientConfig,
+        channel: UnrealChannel,
+    ) -> UnrealscriptAdapter {
+        let adapter = UnrealscriptAdapter {
+            class_map: BTreeMap::new(),
+            channel,
+            client,
+            config,
+            control: None,
+            events: None,
+        };
 
-    /// Process a DAP request, returning a response.
-    fn accept(&mut self, request: Request, ctx: &mut dyn Context) -> Result<Response, Self::Error> {
+        adapter
+    }
+
+    /// Enqueue an event to the adapter queue.
+    fn queue_event(&mut self, evt: Event) -> () {
+        self.events
+            .as_ref()
+            .unwrap()
+            .blocking_send(evt)
+            .expect("Receiver cannot drop.");
+    }
+
+    /// Main loop of the adapter process. This monitors several different communications
+    /// channels and dispatches messages:
+    ///
+    /// - Watch the client for incoming requests and send back a response.
+    /// - Watch the interface's event queue for incoming events, translate them
+    ///   and push them into the adapter's event queue.
+    /// - Watch the adapter event queue and push events to the client.
+    /// - Watch the control queue for shutdown messages, closing the loop if we
+    ///   get one.
+    ///
+    pub async fn process_messages(&mut self) -> Result<(), UnrealscriptAdapterError> {
+        // Set up the control channel
+        let (ctx, mut crx) = broadcast::channel(10);
+        self.control = Some(ctx);
+
+        // Set up the event channel
+        let (etx, mut erx) = mpsc::channel(128);
+        self.events = Some(etx);
+
+        // Now that we're connected we can tell the client that we're ready to receive breakpoint
+        // info, etc. Send the 'initialized' event.
+        self.queue_event(Event {
+            body: events::EventBody::Initialized,
+        });
+
+        loop {
+            select! {
+                request = self.client.next() => {
+                    let response = match self.accept(&request) {
+                        Ok(body) => Response::make_success(&request, body),
+                        Err(e) => Response::make_error(&request, e.to_error_message()),
+                    };
+                    self.client.respond(response).await;
+                }
+                evt = self.channel.next_event() => {
+                    // We received an event from the interface. Translate it to
+                    // a DAP event and send to the client.
+                    match evt {
+                        Some(evt) => {
+                            log::trace!("Received unreal event {evt:?}");
+                            if let Some(dap_event) = self.process_event(evt) {
+                                self.client.send_event(dap_event).await;
+                            }
+                        },
+                        None => {
+                            // The remote side has closed the connection, so we have to
+                            // stop. Send a terminated event to the client and exit the
+                            // loop.
+                            log::info!("Debuggee has closed the event connection socket.");
+                            self.client.send_event(Event{
+                                body: EventBody::Terminated(None)
+                            }).await;
+                            return Ok(());
+                        }
+                    };
+                }
+                ctrl = crx.recv() => {
+                    match ctrl {
+                        Ok(ControlMessage::Shutdown) => {
+                            log::info!("Shutdown message received. Stopping adapter.");
+                            self.client.send_event(Event{
+                                body: EventBody::Terminated(None)
+                            }).await;
+                            return Ok(());
+                        },
+                        Err(broadcast::error::RecvError::Closed) => unreachable!(),
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            log::error!("Control queue full!");
+                        },
+                    };
+                }
+                evt = erx.recv() => {
+                    match evt {
+                        Some(evt) => {
+                            log::trace!("Dispatching event: {evt:?}");
+                            self.client.send_event(evt).await;
+                        },
+                        None => {
+                            // TODO Rework errors, this probably logs twice and should instead
+                            // return the message in the error.
+                            log::error!("Event channel closed!");
+                            self.client.send_event(Event{
+                                body: EventBody::Terminated(None)
+                            }).await;
+                            return Err(UnrealscriptAdapterError::NotConnected);
+                        }
+                    };
+                }
+            };
+        }
+    }
+
+    /// Process a DAP request, returning a response body.
+    pub fn accept(&mut self, request: &Request) -> Result<ResponseBody, Error> {
         log::info!("Got request {request:#?}");
-        let response = match &request.command {
-            Command::Initialize(args) => self.initialize(args),
+        match &request.command {
             Command::SetBreakpoints(args) => self.set_breakpoints(args),
             Command::Threads => self.threads(),
-            Command::ConfigurationDone => {
-                return Ok(Response::make_ack(&request).expect("ConfigurationDone can be acked"))
-            }
-            Command::Attach(args) => self.attach(args, ctx),
-            Command::Launch(args) => self.launch(args, ctx),
+            Command::ConfigurationDone => Ok(ResponseBody::ConfigurationDone),
             Command::Disconnect(args) => self.disconnect(args),
             Command::StackTrace(args) => self.stack_trace(args),
             Command::Scopes(args) => self.scopes(args),
-            Command::Variables(args) => self.variables(args, ctx),
+            Command::Variables(args) => self.variables(args),
             Command::Evaluate(args) => self.evaluate(args),
             Command::Pause(args) => self.pause(args),
             Command::Continue(args) => self.go(args),
@@ -163,51 +268,11 @@ impl Adapter for UnrealscriptAdapter {
             Command::StepOut(args) => self.step_out(args),
             cmd => {
                 log::error!("Unhandled command: {cmd:#?}");
-                Err(UnrealscriptAdapterError::UnhandledCommandError(
+                Err(UnrealscriptAdapterError::UnhandledCommand(
                     request.command.name().to_string(),
                 ))
             }
-        };
-
-        match response {
-            Ok(body) => Ok(Response::make_success(&request, body)),
-            Err(e) => Ok(Response::make_error(&request, e.to_error_message())),
         }
-    }
-}
-
-impl UnrealscriptAdapter {
-    /// Handle an initialize request
-    fn initialize(
-        &mut self,
-        args: &InitializeArguments,
-    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        // If the client sends linesStartAt1: false then we need to adjust
-        // all the line numbers we receive.
-        self.one_based_lines = args.lines_start_at1.unwrap_or(true);
-
-        // Remember if the client supports a type field for variables.
-        self.supports_variable_type = args.supports_variable_type.unwrap_or(false);
-
-        // Remember if the client supports invalidated events.
-        self.supports_invalidated_event = args.supports_invalidated_event.unwrap_or(false);
-
-        Ok(ResponseBody::Initialize(Some(Capabilities {
-            supports_configuration_done_request: Some(true),
-            supports_delayed_stack_trace_loading: Some(true),
-            supports_value_formatting_options: Some(false),
-            ..Default::default()
-        })))
-    }
-
-    /// Utility function for requests that require an active debugger connection.
-    /// Returns a unit OK result if we are connected, or an UnrealscriptAdapterError
-    /// otherwise.
-    fn ensure_connected(&mut self) -> Result<(), UnrealscriptAdapterError> {
-        self.channel
-            .as_mut()
-            .ok_or(UnrealscriptAdapterError::NotConnected)
-            .and(Ok(()))
     }
 
     /// Handle a setBreakpoints request
@@ -216,9 +281,6 @@ impl UnrealscriptAdapter {
         args: &SetBreakpointsArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         log::info!("Set breakpoints request");
-
-        // If we are not connected we cannot proceed
-        self.ensure_connected()?;
 
         // Break the source file out into sections and record it in our map of
         // known classes if necessary.
@@ -242,8 +304,6 @@ impl UnrealscriptAdapter {
         for bp in class_info.breakpoints.iter() {
             let removed = self
                 .channel
-                .as_mut()
-                .unwrap()
                 .remove_breakpoint(Breakpoint::new(&qualified_class_name, *bp))?;
 
             // The internal state of the adapter's breakpoint list should always be consistent with
@@ -261,12 +321,10 @@ impl UnrealscriptAdapter {
                 // Note that Unreal only accepts 32-bit lines.
                 if let Ok(mut line) = bp.line.try_into() {
                     // The line number received may require adjustment
-                    line += if self.one_based_lines { 0 } else { 1 };
+                    line += if self.config.one_based_lines { 0 } else { 1 };
 
                     let new_bp = self
                         .channel
-                        .as_mut()
-                        .unwrap()
                         .add_breakpoint(Breakpoint::new(&qualified_class_name, line))?;
 
                     // Record this breakpoint in our data structure
@@ -278,7 +336,7 @@ impl UnrealscriptAdapter {
                         // Line number may require adjustment before sending back out to the
                         // client.
                         line: Some(
-                            (new_bp.line + if self.one_based_lines { 0 } else { -1 }).into(),
+                            (new_bp.line + if self.config.one_based_lines { 0 } else { -1 }).into(),
                         ),
                         source: Some(class_info.to_source()),
                         ..Default::default()
@@ -305,41 +363,10 @@ impl UnrealscriptAdapter {
         }))
     }
 
-    /// Extract the port number from a launch/attach arguments value map.
-    fn extract_port(value: &Option<Value>) -> Option<u16> {
-        value.as_ref()?["port"].as_i64()?.try_into().ok()
-    }
-
-    /// Extract the program from launch arguments.
-    fn extract_program(value: &Option<Value>) -> Option<&str> {
-        value.as_ref()?["program"].as_str()
-    }
-
-    /// Extract the argument list from launch arguments.
-    fn extract_args(value: &Option<Value>) -> Option<impl Iterator<Item = &str>> {
-        let arr = value.as_ref()?["args"].as_array()?;
-        Some(
-            arr.iter()
-                .filter(|e| e.is_string())
-                .map(|e| e.as_str().unwrap()),
-        )
-    }
-
-    /// Extract the source roots list from the launch/attach arguments.
-    fn extract_source_roots(value: &Option<Value>) -> Option<Vec<String>> {
-        let arr = value.as_ref()?["sourceRoots"].as_array()?;
-        Some(
-            arr.iter()
-                .filter(|e| e.is_string())
-                .map(|e| e.as_str().unwrap().to_string())
-                .collect(),
-        )
-    }
-
     /// Given a package and class name, search the provided source roots in order looking for the
     /// first one that has a file that matches these names.
     fn find_source_file(&mut self, package: &str, class: &str) -> Option<String> {
-        for root in &self.source_roots {
+        for root in &self.config.source_roots {
             let path = Path::new(root);
             if !path.exists() {
                 log::error!("Invalid source root: {root}");
@@ -437,140 +464,12 @@ impl UnrealscriptAdapter {
         })
     }
 
-    /// Connect to the debugger interface. When connected this will send an 'initialized' event to
-    /// DAP. This is shared by both the 'launch' and 'attach' requests.
-    fn connect_to_interface(
-        &mut self,
-        port: u16,
-        ctx: &mut dyn Context,
-        child: Option<Child>,
-    ) -> Result<(), UnrealscriptAdapterError> {
-        log::info!("Connecting to port {port}");
-
-        let event_sender = ctx.get_event_sender();
-        // Connect to the unrealscript interface and set up the communications channel between
-        // it and this adapter.
-        //
-        // TODO This API is awful, fix it.
-        let conn = comm::connect(port)?;
-
-        // The adapter keeps the channel for communicating with the interface: it can send commands
-        // and receive responses.
-        self.channel = Some(conn.0);
-
-        // The event receiving channel is spun out to a separate thread.
-        let event_receiver = conn.1;
-        self.event_thread = Some(std::thread::spawn(move || {
-            event_loop(event_sender, event_receiver, child)
-        }));
-
-        // Now that we're connected we can tell the client that we're ready to receive breakpoint
-        // info, etc. Send the 'initialized' event.
-        ctx.send_event(Event {
-            body: events::EventBody::Initialized,
-        })
-        .or(Err(UnrealscriptAdapterError::CommunicationError(
-            ChannelError::ConnectionError,
-        )))?;
-
-        Ok(())
-    }
-
-    /// Attach to a running unreal process
-    fn attach(
-        &mut self,
-        args: &AttachRequestArguments,
-        ctx: &mut dyn Context,
-    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        log::info!("Attach request");
-        let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
-        match Self::extract_source_roots(&args.other) {
-            Some(v) => self.source_roots = v,
-            _ => (),
-        };
-        self.connect_to_interface(port, ctx, None)?;
-        Ok(ResponseBody::Attach)
-    }
-
-    /// Launch a process and attach to it.
-    fn launch(
-        &mut self,
-        args: &LaunchRequestArguments,
-        ctx: &mut dyn Context,
-    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        let program = Self::extract_program(&args.other).ok_or(
-            UnrealscriptAdapterError::InvalidProgram("No program provided".to_string()),
-        )?;
-
-        match Self::extract_source_roots(&args.other) {
-            Some(v) => self.source_roots = v,
-            _ => (),
-        };
-
-        let program_args = Self::extract_args(&args.other);
-
-        let mut command = &mut std::process::Command::new(program);
-        if program_args.is_some() {
-            command = command.args(program_args.unwrap());
-            log::info!("Program args are {:#?}", command.get_args());
-        }
-
-        // Unless instructed otherwise we're going to debug the launched process, so pass
-        // '-autoDebug' and try to connect. If 'no_debug' is 'true' then we're just launching and
-        // will not try to debug. We could get a later 'attach' request, in which case we can
-        // attach, but that also requires the user to enable the debugger from the unreal side with
-        // 'toggledebugger'.
-        let auto_debug = match args.no_debug {
-            Some(true) => false,
-            _ => true,
-        };
-
-        // Append '-autoDebug' if we're launching so we can be sure the interface will launch and
-        // we can connect.
-        if auto_debug {
-            command = command.arg("-autoDebug");
-        }
-
-        log::info!(
-            "Launching {} with arguments {:#?}",
-            program,
-            command.get_args()
-        );
-
-        // Spawn the process.
-        //
-        // Note we must disconnect all streams (or we could pipe them elsewhere...). By
-        // default in/out/err streams are inherited from the parent process, and we do _not_ want
-        // unreal writing to stdout or reading from stdin since those are our communication
-        // channel with the DAP client.
-        let child = command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .or(Err(UnrealscriptAdapterError::InvalidProgram(format!(
-                "Failed to launch {0}",
-                program
-            ))))?;
-
-        // If we're auto-debugging we can now connect to the interface.
-        if auto_debug {
-            let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
-            self.connect_to_interface(port, ctx, Some(child))?;
-        }
-
-        Ok(ResponseBody::Launch)
-    }
-
     fn disconnect(
         &mut self,
         _args: &DisconnectArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         // TODO send a 'stopdebugging' command, and shut down our event loop.
-        self.ensure_connected()?;
-        self.channel.as_mut().unwrap().disconnect()?;
-        // Close the channel
-        self.channel.take();
+        self.channel.disconnect()?;
         return Ok(ResponseBody::Disconnect);
     }
 
@@ -595,16 +494,10 @@ impl UnrealscriptAdapter {
 
         log::info!("Stack trace request for {levels} frames starting at {start_frame}");
 
-        self.ensure_connected()?;
-
-        let response = self
-            .channel
-            .as_mut()
-            .unwrap()
-            .stack_trace(StackTraceRequest {
-                start_frame,
-                levels,
-            })?;
+        let response = self.channel.stack_trace(StackTraceRequest {
+            start_frame,
+            levels,
+        })?;
         Ok(ResponseBody::StackTrace(
             dap::responses::StackTraceResponse {
                 stack_frames: response
@@ -650,14 +543,10 @@ impl UnrealscriptAdapter {
         let locals_ref =
             VariableReference::new(WatchKind::Local, frame_index, VariableIndex::SCOPE);
 
-        self.ensure_connected()?;
-
         // For the top-most frame (0) only, fetch all the watch data from the debugger.
         let local_vars = if args.frame_id == 0 {
             Some(
                 self.channel
-                    .as_mut()
-                    .unwrap()
                     .watch_count(WatchKind::Local, VariableIndex::SCOPE)?
                     .try_into()
                     .or(Err(UnrealscriptAdapterError::LimitExceeded(
@@ -671,8 +560,6 @@ impl UnrealscriptAdapter {
         let global_vars = if args.frame_id == 0 {
             Some(
                 self.channel
-                    .as_mut()
-                    .unwrap()
                     .watch_count(WatchKind::Global, VariableIndex::SCOPE)?
                     .try_into()
                     .or(Err(UnrealscriptAdapterError::LimitExceeded(
@@ -707,9 +594,7 @@ impl UnrealscriptAdapter {
         &mut self,
         args: &EvaluateArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.ensure_connected()?;
-
-        let var = self.channel.as_mut().unwrap().evaluate(&args.expression)?;
+        let var = self.channel.evaluate(&args.expression)?;
 
         // We may get back a `None`, which means that something has gone wrong with evaluating this
         // expression. This is not a typical error, passing an invalid expression will usually
@@ -740,10 +625,7 @@ impl UnrealscriptAdapter {
     fn variables(
         &mut self,
         args: &VariablesArguments,
-        ctx: &mut dyn Context,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.ensure_connected()?;
-
         let var = VariableReference::from_int(args.variables_reference).ok_or(
             UnrealscriptAdapterError::LimitExceeded("Variable reference out of range".to_string()),
         )?;
@@ -754,7 +636,7 @@ impl UnrealscriptAdapter {
         // for one of the types. Even if the client requested a particular filtering we would
         // either send the whole list (if the filter matched) or nothing (if it didn't).
         let (vars, invalidated) =
-            self.channel.as_mut().unwrap().variables(
+            self.channel.variables(
                 var.kind(),
                 var.frame().try_into().unwrap(),
                 var.variable().try_into().unwrap(),
@@ -774,20 +656,16 @@ impl UnrealscriptAdapter {
         // and incorrect (0) line number before asking for the variables and before we send this
         // event, so it will jump to the file but the wrong line the first time you switch to that
         // stack frame. Clicking on it again will go to the correct line.
-        if invalidated && self.supports_invalidated_event {
+        if invalidated && self.config.supports_invalidated_event {
             log::trace!("Invalidating frame {}", var.frame());
-            ctx.send_event(Event {
+            self.queue_event(Event {
                 body: EventBody::Invalidated(InvalidatedEventBody {
                     areas: Some(vec![InvalidatedAreas::Stacks]),
                     thread_id: None,
                     stack_frame_id: Some(var.frame().into()),
                 }),
-            })
-            .or(Err(UnrealscriptAdapterError::CommunicationError(
-                ChannelError::ConnectionError,
-            )))?;
+            });
         }
-
         Ok(ResponseBody::Variables(VariablesResponse {
             variables: vars
                 .iter()
@@ -798,7 +676,7 @@ impl UnrealscriptAdapter {
                     dap::types::Variable {
                         name: v.name.clone(),
                         value: v.value.clone(),
-                        type_field: if self.supports_variable_type {
+                        type_field: if self.config.supports_variable_type {
                             Some(v.ty.clone())
                         } else {
                             None
@@ -819,17 +697,12 @@ impl UnrealscriptAdapter {
 
     fn get_child_count(&mut self, kind: WatchKind, var: &Variable) -> Option<i64> {
         if var.has_children {
-            self.channel
-                .as_mut()
-                .unwrap()
-                .watch_count(kind, var.index)
-                .ok()
-                .map(|c| {
-                    c.try_into().unwrap_or_else(|_| {
-                        log::error!("Child count for var {} too large", var.name);
-                        0
-                    })
+            self.channel.watch_count(kind, var.index).ok().map(|c| {
+                c.try_into().unwrap_or_else(|_| {
+                    log::error!("Child count for var {} too large", var.name);
+                    0
                 })
+            })
         } else {
             None
         }
@@ -837,25 +710,19 @@ impl UnrealscriptAdapter {
 
     /// "Pause": Tell the debugger to break as soon as possible.
     fn pause(&mut self, _args: &PauseArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.ensure_connected()?;
-        self.channel.as_mut().unwrap().pause()?;
-
+        self.channel.pause()?;
         Ok(ResponseBody::Pause)
     }
 
     fn go(&mut self, _args: &ContinueArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.ensure_connected()?;
-        self.channel.as_mut().unwrap().go()?;
-
+        self.channel.go()?;
         Ok(ResponseBody::Continue(ContinueResponse {
             all_threads_continued: Some(true),
         }))
     }
 
     fn next(&mut self, _args: &NextArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.ensure_connected()?;
-        self.channel.as_mut().unwrap().next()?;
-
+        self.channel.next()?;
         Ok(ResponseBody::Next)
     }
 
@@ -863,8 +730,7 @@ impl UnrealscriptAdapter {
         &mut self,
         _args: &StepInArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.ensure_connected()?;
-        self.channel.as_mut().unwrap().step_in()?;
+        self.channel.step_in()?;
         Ok(ResponseBody::StepIn)
     }
 
@@ -872,112 +738,51 @@ impl UnrealscriptAdapter {
         &mut self,
         _args: &StepOutArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.ensure_connected()?;
-        self.channel.as_mut().unwrap().step_out()?;
+        self.channel.step_out()?;
         Ok(ResponseBody::StepOut)
     }
-}
 
-/// The event processing loop for the adapter.
-///
-/// This is spun up in a dedicated thread once we attacht to the Unreal interface. This will
-/// receive a stream of serialized UnrealEvent messages, translate them to DAP events, and dispatch
-/// them to the client.
-///
-/// The adapter itself does not see any events and has no mechanism to process them, but events we
-/// pass through to DAP may trigger requests that the adapter will handle.
-///
-/// This loop will return when we receive a Disconnect event or either the sending channel from
-/// Unreal or the receiving side of the event channel are closed. The sending channel closing
-/// likely indicates a fatal error in the interface: if the debugger is stopped gracefully from the
-/// Unreal side we expect to receive a Disconnect event first. In this case we will send an
-/// 'exited' event with a non-zero code before returning.
-fn event_loop(
-    sender: Box<dyn EventSend>,
-    receiver: Deserializer<IoRead<TcpStream>>,
-    child: Option<Child>,
-) -> () {
-    for evt in receiver.into_iter::<UnrealEvent>() {
-        let res = match evt {
-            Ok(UnrealEvent::Log(msg)) => sender.send_event(events::Event {
-                body: events::EventBody::Output(OutputEventBody {
-                    category: Some(OutputEventCategory::Stdout),
-                    output: msg,
-                    ..Default::default()
-                }),
-            }),
-            Ok(UnrealEvent::Stopped) => sender.send_event(events::Event {
-                body: events::EventBody::Stopped(StoppedEventBody {
-                    reason: StoppedEventReason::Breakpoint,
-                    thread_id: Some(UNREAL_THREAD_ID),
-                    description: None,
-                    preserve_focus_hint: None,
-                    text: None,
-                    all_threads_stopped: None,
-                    hit_breakpoint_ids: None,
-                }),
-            }),
-            Ok(UnrealEvent::Disconnect) => {
-                log::info!("Received disconnect event from Unreal. Closing down the event loop");
-
-                // It's fine if we fail to send this event, in that case the adapter is already
-                // closing down too.
-                sender
-                    .send_event(events::Event {
-                        body: events::EventBody::Terminated(None),
-                    })
-                    .ok();
-                return;
+    /// Process an event received from the interface, turning it into an event
+    /// to send to the client.
+    fn process_event(&mut self, evt: UnrealEvent) -> Option<Event> {
+        match evt {
+            UnrealEvent::Log(msg) => {
+                return Some(Event {
+                    body: events::EventBody::Output(OutputEventBody {
+                        category: Some(OutputEventCategory::Stdout),
+                        output: msg,
+                        ..Default::default()
+                    }),
+                })
             }
-
-            Err(e) => {
-                log::error!(
-                    "Deserialization error receiving event from the debugger interface: {e}"
-                );
-                continue;
+            UnrealEvent::Stopped => {
+                return Some(Event {
+                    body: events::EventBody::Stopped(StoppedEventBody {
+                        reason: StoppedEventReason::Breakpoint,
+                        thread_id: Some(UNREAL_THREAD_ID),
+                        description: None,
+                        preserve_focus_hint: None,
+                        text: None,
+                        all_threads_stopped: None,
+                        hit_breakpoint_ids: None,
+                    }),
+                })
+            }
+            UnrealEvent::Disconnect => {
+                // We've received a disconnect event from interface. This means
+                // the connection is shutting down. Send the shutdown control
+                // message to our control channel so it can cleanly close down
+                // the processing loop. We don't return a DAP event here as we
+                // will send a terminate event when we close down the loop.
+                self.control
+                    .as_ref()
+                    .unwrap()
+                    .send(ControlMessage::Shutdown)
+                    .expect("Control channel cannot drop");
+                return None;
             }
         };
-
-        // If sending the event through the sender returned an error that can only indicate that
-        // the receiving side has closed the channel. This indicates the adapter is shutting down,
-        // so we can return.
-        if res.is_err() {
-            return;
-        }
     }
-
-    log::info!("Event loop exited: Unreal stopped?");
-
-    // The iterator is exhausted, which means we've lost the connection to the interface without
-    // receiving a 'Disconnect' event. This likely means something terrible has happened to Unreal
-    // (or the user has just closed it). If we are in a launch configuration then we should be
-    // able to check the exit code of the child process.
-    //
-    // Send the adapter an "Exited" event, followed by a "terminated" event. If either of these
-    // fails to send because the adapter is closing down too then we can just ignore the error.
-
-    // Check if we have an exit code from the child process. We're not going to try too hard
-    // to get this, if it's not available just return a default code -- we're sending a terminated
-    // event so if we were launched the client is going to kill this process anyway so we don't
-    // need to worry too much about leaking.
-    let exit_code = child
-        .and_then(|mut c| c.try_wait().ok())
-        .flatten()
-        .and_then(|c| c.code())
-        .unwrap_or(UNREAL_UNEXPECTED_EXIT_CODE);
-
-    sender
-        .send_event(events::Event {
-            body: events::EventBody::Exited(ExitedEventBody {
-                exit_code: exit_code.into(),
-            }),
-        })
-        .ok();
-    sender
-        .send_event(events::Event {
-            body: events::EventBody::Terminated(None),
-        })
-        .ok();
 }
 
 /// Information about a class.
@@ -1063,92 +868,39 @@ pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError
 
 #[cfg(test)]
 mod tests {
-    use common::{Frame, FrameIndex, VariableIndex};
+    use common::{UnrealCommand, UnrealResponse};
     use dap::types::{Source, SourceBreakpoint};
 
     use super::*;
-
-    struct MockChannel;
-
-    impl UnrealChannel for MockChannel {
-        fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
-            Ok(bp)
-        }
-        fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ChannelError> {
-            Ok(bp)
-        }
-
-        fn stack_trace(
-            &mut self,
-            _stack: common::StackTraceRequest,
-        ) -> Result<common::StackTraceResponse, ChannelError> {
-            Ok(common::StackTraceResponse { frames: vec![] })
-        }
-
-        fn watch_count(
-            &mut self,
-            _kind: WatchKind,
-            _parent: VariableIndex,
-        ) -> Result<usize, ChannelError> {
-            Ok(0)
-        }
-
-        fn frame(&mut self, _idx: FrameIndex) -> Result<Option<Frame>, ChannelError> {
-            Ok(None)
-        }
-
-        fn variables(
-            &mut self,
-            _kind: WatchKind,
-            _frame: FrameIndex,
-            _variable: VariableIndex,
-            _start: usize,
-            _count: usize,
-        ) -> Result<(Vec<common::Variable>, bool), ChannelError> {
-            Ok((vec![], false))
-        }
-
-        fn evaluate(&mut self, _expr: &str) -> Result<Option<Variable>, ChannelError> {
-            Ok(Some(Variable {
-                name: "Var".to_string(),
-                ty: "type".to_string(),
-                value: "val".to_string(),
-                index: VariableIndex::create(1).unwrap(),
-                has_children: false,
-                is_array: false,
-            }))
-        }
-
-        fn pause(&mut self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        fn go(&mut self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        fn next(&mut self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        fn step_in(&mut self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        fn step_out(&mut self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        fn disconnect(&mut self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-    }
 
     const GOOD_PATH: &str = if cfg!(windows) {
         "C:\\foo\\src\\MyPackage\\classes\\SomeClass.uc"
     } else {
         "/home/somebody/src/MyPackage/classes/SomeClass.uc"
     };
+
+    fn make_client() -> AsyncClient {
+        AsyncClient::new(tokio::io::stdin(), tokio::io::stdout())
+    }
+
+    fn make_test_adapter() -> (
+        UnrealscriptAdapter,
+        mpsc::Sender<UnrealResponse>,
+        mpsc::Sender<UnrealEvent>,
+        mpsc::Receiver<UnrealCommand>,
+    ) {
+        let (rtx, rrx) = mpsc::channel(128);
+        let (etx, erx) = mpsc::channel(128);
+        let (ctx, crx) = mpsc::channel(128);
+
+        let adapter = UnrealscriptAdapter::new(
+            make_client(),
+            ClientConfig::default(),
+            UnrealChannel::new(rrx, erx, ctx),
+        );
+
+        (adapter, rtx, etx, crx)
+    }
 
     #[test]
     fn can_split_source() {
@@ -1182,10 +934,9 @@ mod tests {
         assert_eq!(qual, "MyPackage.SomeClass")
     }
 
-    #[test]
-    fn add_breakpoint_registers_class() {
-        let mut adapter = UnrealscriptAdapter::new();
-        adapter.channel = Some(Box::new(MockChannel {}));
+    #[tokio::test]
+    async fn add_breakpoint_registers_class() {
+        let (mut adapter, a, b, c) = make_test_adapter();
         let args = SetBreakpointsArguments {
             source: Source {
                 path: Some(GOOD_PATH.to_string()),
@@ -1211,8 +962,7 @@ mod tests {
 
     #[test]
     fn add_multiple_breakpoints() {
-        let mut adapter = UnrealscriptAdapter::new();
-        adapter.channel = Some(Box::new(MockChannel {}));
+        let (mut adapter, _, _, _) = make_test_adapter();
         let args = SetBreakpointsArguments {
             source: Source {
                 path: Some(GOOD_PATH.to_string()),
@@ -1241,8 +991,7 @@ mod tests {
 
     #[test]
     fn reset_breakpoints() {
-        let mut adapter = UnrealscriptAdapter::new();
-        adapter.channel = Some(Box::new(MockChannel {}));
+        let (mut adapter, _rtx, _etx, _crx) = make_test_adapter();
         let mut args = SetBreakpointsArguments {
             source: Source {
                 path: Some(GOOD_PATH.to_string()),

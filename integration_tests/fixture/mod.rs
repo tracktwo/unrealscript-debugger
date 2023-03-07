@@ -1,64 +1,17 @@
 use std::{
-    net::TcpListener,
-    sync::mpsc::SendError,
-    thread::{self, JoinHandle},
+    thread::JoinHandle,
     time::Duration,
 };
 
-use adapter::UnrealscriptAdapter;
+use adapter::{UnrealscriptAdapter, async_client::AsyncClient, ClientConfig, comm::UnrealChannel};
 use common::UnrealCommand;
 use dap::{
-    events::EventSend,
-    prelude::{Adapter, Context, Event},
     requests::{self, Command, Request},
     responses::ResponseBody,
 };
 use interface::debugger::Debugger;
 use serde_json::{json, Map, Value};
-
-// Event sender for tests. Passes the event given through a channel. The other
-// end of the channel is returned as part of fixture setup and the event can be
-// received there.
-pub struct MockEventSender {
-    sender: std::sync::mpsc::Sender<Event>,
-}
-
-impl EventSend for MockEventSender {
-    fn send_event(&self, t: Event) -> Result<(), SendError<Event>> {
-        self.sender.send(t)
-    }
-}
-
-impl Clone for MockEventSender {
-    fn clone(&self) -> Self {
-        MockEventSender {
-            sender: self.sender.clone(),
-        }
-    }
-}
-
-pub struct MockContext {
-    event_sender: MockEventSender,
-}
-
-/// A mock context. Events and reverse requests sent to this context are silently discarded.
-impl Context for MockContext {
-    fn send_event(&mut self, _event: dap::prelude::Event) -> Result<(), SendError<Event>> {
-        Ok(())
-    }
-
-    fn request_exit(&mut self) {}
-
-    fn cancel_exit(&mut self) {}
-
-    fn get_exit_state(&self) -> bool {
-        false
-    }
-
-    fn get_event_sender(&mut self) -> Box<dyn EventSend> {
-        Box::new(self.event_sender.clone())
-    }
-}
+use tokio::net::TcpListener;
 
 /// Integration test setup:
 /// - construct an adapter and client
@@ -71,14 +24,10 @@ impl Context for MockContext {
 ///
 /// Test cases can now send requests and receive responses through the adapter. Events sent from
 /// the closure will appear in the event receiver.
-pub fn setup<F>(
+pub async fn setup<F>(
     f: F,
-) -> (
-    UnrealscriptAdapter,
-    MockContext,
-    std::sync::mpsc::Receiver<Event>,
-    JoinHandle<()>,
-)
+) -> 
+    UnrealscriptAdapter
 where
     F: FnOnce(
             &mut Debugger,
@@ -87,17 +36,18 @@ where
         + Send
         + 'static,
 {
-    let mut adapter = UnrealscriptAdapter::new();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let event_sender = MockEventSender { sender };
-    let mut context = MockContext { event_sender };
+    let mut adapter = UnrealscriptAdapter::new(
+        AsyncClient::new(tokio::io::stdin(), tokio::io::stdout()),
+        ClientConfig::default(),
+        UnrealChannel::new()
+    );
 
-    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp.local_addr().unwrap().port();
 
-    let interface_thread = thread::spawn(move || {
+    let interface_task = tokio::spawn(async move {
         let mut dbg = Debugger::new();
-        let (stream, _addr) = tcp.accept().unwrap();
+        let (stream, _addr) = tcp.accept().await.unwrap();
         let mut deserializer = serde_json::Deserializer::from_reader(stream.try_clone().unwrap())
             .into_iter::<UnrealCommand>();
 
