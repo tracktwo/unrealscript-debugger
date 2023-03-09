@@ -6,6 +6,8 @@ use dap::{
     requests::{Command, Request},
     types::{Source, SourceBreakpoint},
 };
+use tokio::task::block_in_place;
+use tokio_stream::StreamExt;
 
 use std::ffi::c_char;
 
@@ -18,11 +20,12 @@ pub const PACKAGE_CLASSNAME: &str = if cfg!(windows) {
 };
 
 /// Set a breakpoint and then mock hitting it, ensuring we get a break event at the expected position.
-#[test]
-fn hit_breakpoint() {
-    let (mut adapter, mut client, _receiver, handle) = fixture::setup(|dbg, deserializer| {
+#[tokio::test(flavor = "multi_thread")]
+async fn hit_breakpoint() {
+    let (mut adapter, mut dbg, mut conn) = fixture::setup().await;
+    tokio::task::spawn(async move {
         // Next command should be add breakpoint
-        let command = deserializer.next().unwrap().unwrap();
+        let command = conn.next().await.unwrap().unwrap();
         assert!(matches!(command, UnrealCommand::AddBreakpoint(_)));
         dbg.handle_command(command).unwrap();
 
@@ -32,71 +35,72 @@ fn hit_breakpoint() {
 
     // Set a breakpoint
     let response = adapter
-        .accept(
-            &Request {
-                seq: 3,
-                command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
-                    source: Source {
-                        path: Some(PACKAGE_CLASSNAME.to_string()),
-                        ..Default::default()
-                    },
-                    breakpoints: Some(vec![SourceBreakpoint {
-                        line: 10,
-                        ..Default::default()
-                    }]),
+        .accept(&Request {
+            seq: 3,
+            command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
+                source: Source {
+                    path: Some(PACKAGE_CLASSNAME.to_string()),
                     ..Default::default()
-                }),
-            },
-        )
+                },
+                breakpoints: Some(vec![SourceBreakpoint {
+                    line: 10,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        })
         .unwrap();
 
     match response {
         ResponseBody::SetBreakpoints(_) => (),
         o => assert!(false, "Expected a setbreakpoints response: {o:#?}"),
     }
-
-    fixture::wait_for_thread(handle);
 }
 
 /// Test removing a breakpoint
-#[test]
-fn remove_breakpoint() {
-    let (mut adapter, mut client, _receiver, handle) = fixture::setup(|dbg, deserializer| {
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_breakpoint() {
+    let (mut adapter, mut dbg, mut conn) = fixture::setup().await;
+    tokio::task::spawn(async move {
+        log::trace!("Entering fixture async block");
         // Next command should be add breakpoint
-        let command = deserializer.next().unwrap().unwrap();
+        log::trace!("Waiting for breakpoint");
+        let command = conn.next().await.unwrap().unwrap();
         assert!(matches!(command, UnrealCommand::AddBreakpoint(_)));
-        dbg.handle_command(command).unwrap();
-
-        // Generate an add breakpoint event from unreal
-        dbg.add_breakpoint(PACKAGE_CLASSNAME.as_ptr() as *mut c_char, 10);
+        block_in_place(|| {
+            dbg.handle_command(command).unwrap();
+            // Generate an add breakpoint event from unreal
+            log::trace!("Sending breakpoint to adapter.");
+            dbg.add_breakpoint(PACKAGE_CLASSNAME.as_ptr() as *mut c_char, 10);
+        });
 
         // Next command should be a remove breakpoint
-        let command = deserializer.next().unwrap().unwrap();
+        let command = conn.next().await.unwrap().unwrap();
         assert!(matches!(command, UnrealCommand::RemoveBreakpoint(_)));
-        dbg.handle_command(command).unwrap();
 
-        // Generate a remove breakpoint event from unreal
-        dbg.remove_breakpoint(PACKAGE_CLASSNAME.as_ptr() as *mut c_char, 10);
+        block_in_place(|| {
+            dbg.handle_command(command).unwrap();
+            // Generate a remove breakpoint event from unreal
+            dbg.remove_breakpoint(PACKAGE_CLASSNAME.as_ptr() as *mut c_char, 10);
+        });
     });
 
     // Set a breakpoint
     let response = adapter
-        .accept(
-            &Request {
-                seq: 3,
-                command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
-                    source: Source {
-                        path: Some(PACKAGE_CLASSNAME.to_string()),
-                        ..Default::default()
-                    },
-                    breakpoints: Some(vec![SourceBreakpoint {
-                        line: 10,
-                        ..Default::default()
-                    }]),
+        .accept(&Request {
+            seq: 3,
+            command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
+                source: Source {
+                    path: Some(PACKAGE_CLASSNAME.to_string()),
                     ..Default::default()
-                }),
-            },
-        )
+                },
+                breakpoints: Some(vec![SourceBreakpoint {
+                    line: 10,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        })
         .unwrap();
 
     match response {
@@ -106,25 +110,21 @@ fn remove_breakpoint() {
 
     // Set no breakpoints. This should generate a remove command to remove the first breakpoint.
     let response = adapter
-        .accept(
-            &Request {
-                seq: 3,
-                command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
-                    source: Source {
-                        path: Some(PACKAGE_CLASSNAME.to_string()),
-                        ..Default::default()
-                    },
-                    breakpoints: None,
+        .accept(&Request {
+            seq: 3,
+            command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
+                source: Source {
+                    path: Some(PACKAGE_CLASSNAME.to_string()),
                     ..Default::default()
-                }),
-            },
-        )
+                },
+                breakpoints: None,
+                ..Default::default()
+            }),
+        })
         .unwrap();
 
     match response {
         ResponseBody::SetBreakpoints(_) => (),
         _o => assert!(false, "Expected a setbreakpoints response: {_o:#?}"),
     }
-
-    fixture::wait_for_thread(handle);
 }

@@ -194,8 +194,6 @@ pub struct Variable {
 /// Commands that can be sent from the adapter to the debugger interface.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UnrealCommand {
-    /// Initialize a new connection with the given path as a shared memory file.
-    Initialize(String),
     /// Set a breakpoint
     AddBreakpoint(Breakpoint),
     /// Remove a breakpoint
@@ -267,4 +265,3 @@ pub enum UnrealInterfaceMessage {
     Response(UnrealResponse),
     Event(UnrealEvent),
 }
-

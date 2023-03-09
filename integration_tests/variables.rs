@@ -2,10 +2,12 @@ mod fixture;
 use adapter::variable_reference::VariableReference;
 use common::{FrameIndex, UnrealCommand, VariableIndex, WatchKind};
 use dap::prelude::*;
+use tokio_stream::StreamExt;
 
-#[test]
-fn frame_0() {
-    let (mut adapter, mut client, _receiver, handle) = fixture::setup(|dbg, deserializer| {
+#[tokio::test(flavor = "multi_thread")]
+async fn frame_0() {
+    let (mut adapter, mut dbg, mut conn) = fixture::setup().await;
+    tokio::task::spawn(async move {
         dbg.add_frame("MyPackage.MyClass\0".as_ptr() as *const i8);
         dbg.add_watch(
             WatchKind::Local,
@@ -14,7 +16,7 @@ fn frame_0() {
             "33\0".as_ptr() as *const i8,
         );
         // Next command should be a variables request.
-        let command = deserializer.next().unwrap().unwrap();
+        let command = conn.next().await.unwrap().unwrap();
 
         assert!(matches!(command, UnrealCommand::Variables(_, _, _, _, _)));
         dbg.handle_command(command).unwrap();
@@ -22,27 +24,24 @@ fn frame_0() {
 
     // Ask for variable 0 in frame 0.
     let response = adapter
-        .accept(
-            Request {
-                seq: 3,
-                command: Command::Variables(requests::VariablesArguments {
-                    variables_reference: VariableReference::new(
-                        WatchKind::Local,
-                        FrameIndex::TOP_FRAME,
-                        VariableIndex::SCOPE,
-                    )
-                    .to_int(),
-                    filter: None,
-                    start: Some(0),
-                    count: Some(0),
-                    format: None,
-                }),
-            },
-            &mut client,
-        )
+        .accept(&Request {
+            seq: 3,
+            command: Command::Variables(requests::VariablesArguments {
+                variables_reference: VariableReference::new(
+                    WatchKind::Local,
+                    FrameIndex::TOP_FRAME,
+                    VariableIndex::SCOPE,
+                )
+                .to_int(),
+                filter: None,
+                start: Some(0),
+                count: Some(0),
+                format: None,
+            }),
+        })
         .unwrap();
 
-    match response.body.unwrap() {
+    match response {
         ResponseBody::Variables(resp) => {
             assert_eq!(resp.variables.len(), 1);
             let v = &resp.variables[0];
@@ -52,19 +51,18 @@ fn frame_0() {
         }
         o => assert!(false, "Expected a variables response: {o:#?}"),
     }
-
-    fixture::wait_for_thread(handle);
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread")]
 /// Test a variables request for a variable in a frame other than the top-most.
-fn frame_2() {
-    let (mut adapter, mut client, _receiver, handle) = fixture::setup(|dbg, deserializer| {
+async fn frame_2() {
+    let (mut adapter, mut dbg, mut conn) = fixture::setup().await;
+    tokio::task::spawn(async move {
         dbg.add_frame("Function MyClass.TopFunction\0".as_ptr() as *const i8);
         dbg.add_frame("Function MyClass.CallingFunction\0".as_ptr() as *const i8);
         dbg.add_frame("Function AnotherClass.AnotherCaller\0".as_ptr() as *const i8);
         // Next command should be a variables request.
-        let command = deserializer.next().unwrap().unwrap();
+        let command = conn.next().await.unwrap().unwrap();
 
         assert!(matches!(command, UnrealCommand::Variables(_, _, _, _, _)));
         dbg.handle_command(command).unwrap();
@@ -82,27 +80,24 @@ fn frame_2() {
 
     // Ask for variable 0 in frame 2.
     let response = adapter
-        .accept(
-            Request {
-                seq: 3,
-                command: Command::Variables(requests::VariablesArguments {
-                    variables_reference: VariableReference::new(
-                        WatchKind::Local,
-                        FrameIndex::create(2).unwrap(),
-                        VariableIndex::SCOPE,
-                    )
-                    .to_int(),
-                    filter: None,
-                    start: Some(0),
-                    count: Some(0),
-                    format: None,
-                }),
-            },
-            &mut client,
-        )
+        .accept(&Request {
+            seq: 3,
+            command: Command::Variables(requests::VariablesArguments {
+                variables_reference: VariableReference::new(
+                    WatchKind::Local,
+                    FrameIndex::create(2).unwrap(),
+                    VariableIndex::SCOPE,
+                )
+                .to_int(),
+                filter: None,
+                start: Some(0),
+                count: Some(0),
+                format: None,
+            }),
+        })
         .unwrap();
 
-    match response.body.unwrap() {
+    match response {
         ResponseBody::Variables(resp) => {
             assert_eq!(resp.variables.len(), 1);
             let v = &resp.variables[0];
@@ -112,7 +107,5 @@ fn frame_2() {
         }
         o => assert!(false, "Expected a variables response: {o:#?}"),
     }
-
-    fixture::wait_for_thread(handle);
 }
 // TODO Test source roots.

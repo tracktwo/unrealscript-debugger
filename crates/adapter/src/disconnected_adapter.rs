@@ -19,9 +19,8 @@ use serde_json::Value;
 use tokio::select;
 
 use crate::{
-    async_client::AsyncClient,
-    comm::{self, UnrealChannel},
-    ClientConfig, UnrealscriptAdapter, UnrealscriptAdapterError,
+    async_client::AsyncClient, comm::tcp::TcpConnection, ClientConfig, UnrealscriptAdapter,
+    UnrealscriptAdapterError,
 };
 
 /// A representation of a disconnected adapter. This manages the portion of the
@@ -104,13 +103,12 @@ impl DisconnectedAdapter {
     async fn connect_to_interface(
         &self,
         port: u16,
-        child: Option<Child>,
-    ) -> Result<UnrealChannel, UnrealscriptAdapterError> {
+    ) -> Result<TcpConnection, UnrealscriptAdapterError> {
         log::info!("Connecting to port {port}");
 
         // Connect to the unrealscript interface and set up the communications channel between
         // it and this adapter.
-        Ok(comm::connect(port).await?)
+        Ok(TcpConnection::connect(port).await?)
     }
 
     /// Attach to a running unreal process.
@@ -127,15 +125,20 @@ impl DisconnectedAdapter {
         self.config.source_roots =
             Self::extract_source_roots(&args.other).unwrap_or_else(|| vec![]);
         // TODO this early return is wrong: we have to send a response.
-        match self.connect_to_interface(port, None).await {
-            Ok(channel) => {
+        match self.connect_to_interface(port).await {
+            Ok(connection) => {
                 // Connection succeeded: Respond with a success response and return
                 // the conneted adapter.
                 self.client
                     .respond(Response::make_success(&req, ResponseBody::Attach))
                     .await;
 
-                return Ok(UnrealscriptAdapter::new(self.client, self.config, channel));
+                return Ok(UnrealscriptAdapter::new(
+                    self.client,
+                    self.config,
+                    Box::new(connection),
+                    None,
+                ));
             }
             Err(e) => {
                 // Connection failed.
@@ -225,8 +228,8 @@ impl DisconnectedAdapter {
                 // If we're auto-debugging we can now connect to the interface.
                 if auto_debug {
                     let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
-                    match self.connect_to_interface(port, Some(child)).await {
-                        Ok(channel) => {
+                    match self.connect_to_interface(port).await {
+                        Ok(connection) => {
                             // Send a response ack for the launch request.
                             self.client
                                 .respond(Response::make_success(req, ResponseBody::Launch))
@@ -234,7 +237,12 @@ impl DisconnectedAdapter {
                             self.config.source_roots =
                                 Self::extract_source_roots(&args.other).unwrap_or_else(|| vec![]);
 
-                            return Ok(UnrealscriptAdapter::new(self.client, self.config, channel));
+                            return Ok(UnrealscriptAdapter::new(
+                                self.client,
+                                self.config,
+                                Box::new(connection),
+                                Some(child),
+                            ));
                         }
                         Err(e) => {
                             // We launched, but failed to connect.

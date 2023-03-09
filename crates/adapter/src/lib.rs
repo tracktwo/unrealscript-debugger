@@ -7,6 +7,7 @@ use std::{
     collections::BTreeMap,
     num::TryFromIntError,
     path::{Component, Path},
+    process::Child,
 };
 
 use async_client::AsyncClient;
@@ -36,34 +37,46 @@ use common::{
     Breakpoint, FrameIndex, StackTraceRequest, UnrealEvent, Variable, VariableIndex, WatchKind,
 };
 
-use comm::{ChannelError, UnrealChannel};
+use comm::{Connection, ConnectionError};
 
 /// The thread ID to use for the unrealscript thread. The unreal debugger only supports one thread.
 const UNREAL_THREAD_ID: i64 = 1;
 
 /// A representation of the client configuration options. These will impact how
 /// we send responses.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct ClientConfig {
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
-    one_based_lines: bool,
+    pub one_based_lines: bool,
     // If true then we will send type information with variables.
-    supports_variable_type: bool,
+    pub supports_variable_type: bool,
     // If true then we'll send invalidated events when fetching variables that involves a stack
     // change.
-    supports_invalidated_event: bool,
-    source_roots: Vec<String>,
+    pub supports_invalidated_event: bool,
+    pub source_roots: Vec<String>,
+}
+
+impl ClientConfig {
+    pub fn new() -> Self {
+        ClientConfig {
+            one_based_lines: true,
+            supports_variable_type: false,
+            supports_invalidated_event: false,
+            source_roots: vec![],
+        }
+    }
 }
 
 /// A connected Unrealscript debug adapter.
 pub struct UnrealscriptAdapter {
     client: AsyncClient,
     config: ClientConfig,
-    channel: UnrealChannel,
+    connection: Box<dyn Connection>,
     class_map: BTreeMap<String, ClassInfo>,
     control: Option<broadcast::Sender<ControlMessage>>,
     events: Option<mpsc::Sender<Event>>,
+    child: Option<Child>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,7 +96,7 @@ pub enum UnrealscriptAdapterError {
     NotConnected,
 
     #[error("Communication error: {0}")]
-    CommunicationError(ChannelError),
+    CommunicationError(ConnectionError),
 
     #[error("Limit exceeded: {0}")]
     LimitExceeded(String),
@@ -121,9 +134,9 @@ impl UnrealscriptAdapterError {
     }
 }
 
-impl From<ChannelError> for UnrealscriptAdapterError {
+impl From<ConnectionError> for UnrealscriptAdapterError {
     /// Convert a ChannelError to an UnrealscriptAdapterError
-    fn from(value: ChannelError) -> Self {
+    fn from(value: ConnectionError) -> Self {
         UnrealscriptAdapterError::CommunicationError(value)
     }
 }
@@ -134,15 +147,17 @@ impl UnrealscriptAdapter {
     pub fn new(
         client: AsyncClient,
         config: ClientConfig,
-        channel: UnrealChannel,
+        connection: Box<dyn Connection>,
+        child: Option<Child>,
     ) -> UnrealscriptAdapter {
         let adapter = UnrealscriptAdapter {
             class_map: BTreeMap::new(),
-            channel,
+            connection,
             client,
             config,
             control: None,
             events: None,
+            child,
         };
 
         adapter
@@ -172,7 +187,9 @@ impl UnrealscriptAdapter {
         let (ctx, mut crx) = broadcast::channel(10);
         self.control = Some(ctx);
 
-        // Set up the event channel
+        // Set up the event channel for DAP events. The adapter needs to generate DAP
+        // events in response to certain states (in particular sending the Initialized event
+        // when initialization completes).
         let (etx, mut erx) = mpsc::channel(128);
         self.events = Some(etx);
 
@@ -191,7 +208,7 @@ impl UnrealscriptAdapter {
                     };
                     self.client.respond(response).await;
                 }
-                evt = self.channel.next_event() => {
+                evt = self.connection.event_receiver().recv() => {
                     // We received an event from the interface. Translate it to
                     // a DAP event and send to the client.
                     match evt {
@@ -303,7 +320,7 @@ impl UnrealscriptAdapter {
         // Remove all the existing breakpoints from this class.
         for bp in class_info.breakpoints.iter() {
             let removed = self
-                .channel
+                .connection
                 .remove_breakpoint(Breakpoint::new(&qualified_class_name, *bp))?;
 
             // The internal state of the adapter's breakpoint list should always be consistent with
@@ -324,7 +341,7 @@ impl UnrealscriptAdapter {
                     line += if self.config.one_based_lines { 0 } else { 1 };
 
                     let new_bp = self
-                        .channel
+                        .connection
                         .add_breakpoint(Breakpoint::new(&qualified_class_name, line))?;
 
                     // Record this breakpoint in our data structure
@@ -469,7 +486,7 @@ impl UnrealscriptAdapter {
         _args: &DisconnectArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         // TODO send a 'stopdebugging' command, and shut down our event loop.
-        self.channel.disconnect()?;
+        self.connection.disconnect()?;
         return Ok(ResponseBody::Disconnect);
     }
 
@@ -494,7 +511,7 @@ impl UnrealscriptAdapter {
 
         log::info!("Stack trace request for {levels} frames starting at {start_frame}");
 
-        let response = self.channel.stack_trace(StackTraceRequest {
+        let response = self.connection.stack_trace(StackTraceRequest {
             start_frame,
             levels,
         })?;
@@ -546,7 +563,7 @@ impl UnrealscriptAdapter {
         // For the top-most frame (0) only, fetch all the watch data from the debugger.
         let local_vars = if args.frame_id == 0 {
             Some(
-                self.channel
+                self.connection
                     .watch_count(WatchKind::Local, VariableIndex::SCOPE)?
                     .try_into()
                     .or(Err(UnrealscriptAdapterError::LimitExceeded(
@@ -559,7 +576,7 @@ impl UnrealscriptAdapter {
 
         let global_vars = if args.frame_id == 0 {
             Some(
-                self.channel
+                self.connection
                     .watch_count(WatchKind::Global, VariableIndex::SCOPE)?
                     .try_into()
                     .or(Err(UnrealscriptAdapterError::LimitExceeded(
@@ -594,7 +611,7 @@ impl UnrealscriptAdapter {
         &mut self,
         args: &EvaluateArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        let var = self.channel.evaluate(&args.expression)?;
+        let var = self.connection.evaluate(&args.expression)?;
 
         // We may get back a `None`, which means that something has gone wrong with evaluating this
         // expression. This is not a typical error, passing an invalid expression will usually
@@ -636,7 +653,7 @@ impl UnrealscriptAdapter {
         // for one of the types. Even if the client requested a particular filtering we would
         // either send the whole list (if the filter matched) or nothing (if it didn't).
         let (vars, invalidated) =
-            self.channel.variables(
+            self.connection.variables(
                 var.kind(),
                 var.frame().try_into().unwrap(),
                 var.variable().try_into().unwrap(),
@@ -697,7 +714,7 @@ impl UnrealscriptAdapter {
 
     fn get_child_count(&mut self, kind: WatchKind, var: &Variable) -> Option<i64> {
         if var.has_children {
-            self.channel.watch_count(kind, var.index).ok().map(|c| {
+            self.connection.watch_count(kind, var.index).ok().map(|c| {
                 c.try_into().unwrap_or_else(|_| {
                     log::error!("Child count for var {} too large", var.name);
                     0
@@ -710,19 +727,19 @@ impl UnrealscriptAdapter {
 
     /// "Pause": Tell the debugger to break as soon as possible.
     fn pause(&mut self, _args: &PauseArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.channel.pause()?;
+        self.connection.pause()?;
         Ok(ResponseBody::Pause)
     }
 
     fn go(&mut self, _args: &ContinueArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.channel.go()?;
+        self.connection.go()?;
         Ok(ResponseBody::Continue(ContinueResponse {
             all_threads_continued: Some(true),
         }))
     }
 
     fn next(&mut self, _args: &NextArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.channel.next()?;
+        self.connection.next()?;
         Ok(ResponseBody::Next)
     }
 
@@ -730,7 +747,7 @@ impl UnrealscriptAdapter {
         &mut self,
         _args: &StepInArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.channel.step_in()?;
+        self.connection.step_in()?;
         Ok(ResponseBody::StepIn)
     }
 
@@ -738,7 +755,7 @@ impl UnrealscriptAdapter {
         &mut self,
         _args: &StepOutArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        self.channel.step_out()?;
+        self.connection.step_out()?;
         Ok(ResponseBody::StepOut)
     }
 
@@ -868,8 +885,10 @@ pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError
 
 #[cfg(test)]
 mod tests {
+
     use common::{UnrealCommand, UnrealResponse};
     use dap::types::{Source, SourceBreakpoint};
+    use tokio::sync::mpsc::Receiver;
 
     use super::*;
 
@@ -883,23 +902,100 @@ mod tests {
         AsyncClient::new(tokio::io::stdin(), tokio::io::stdout())
     }
 
-    fn make_test_adapter() -> (
-        UnrealscriptAdapter,
-        mpsc::Sender<UnrealResponse>,
-        mpsc::Sender<UnrealEvent>,
-        mpsc::Receiver<UnrealCommand>,
-    ) {
-        let (rtx, rrx) = mpsc::channel(128);
-        let (etx, erx) = mpsc::channel(128);
-        let (ctx, crx) = mpsc::channel(128);
+    struct MockConnection {}
 
+    // A mock connection for testing. This version does not use the low-level required
+    // trait methods: they all panic. It reimplements the high-level API to return mocked
+    // values instead.
+    impl Connection for MockConnection {
+        fn send_command(&mut self, _command: UnrealCommand) -> Result<(), ConnectionError> {
+            unreachable!();
+        }
+
+        fn next_response(&mut self) -> Result<UnrealResponse, ConnectionError> {
+            unreachable!()
+        }
+
+        fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent> {
+            unreachable!()
+        }
+
+        fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ConnectionError> {
+            Ok(bp)
+        }
+
+        fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ConnectionError> {
+            Ok(bp)
+        }
+
+        fn stack_trace(
+            &mut self,
+            _req: StackTraceRequest,
+        ) -> Result<common::StackTraceResponse, ConnectionError> {
+            unreachable!()
+        }
+
+        fn watch_count(
+            &mut self,
+            _kind: WatchKind,
+            _parent: VariableIndex,
+        ) -> Result<usize, ConnectionError> {
+            unreachable!()
+        }
+
+        fn frame(&mut self, _frame: FrameIndex) -> Result<Option<common::Frame>, ConnectionError> {
+            unreachable!()
+        }
+
+        fn evaluate(&mut self, _expr: &str) -> Result<Option<Variable>, ConnectionError> {
+            unreachable!()
+        }
+
+        fn variables(
+            &mut self,
+            _kind: WatchKind,
+            _frame: FrameIndex,
+            _variable: VariableIndex,
+            _start: usize,
+            _count: usize,
+        ) -> Result<(Vec<Variable>, bool), ConnectionError> {
+            unreachable!()
+        }
+
+        fn pause(&mut self) -> Result<(), ConnectionError> {
+            Ok(())
+        }
+
+        fn go(&mut self) -> Result<(), ConnectionError> {
+            Ok(())
+        }
+
+        fn next(&mut self) -> Result<(), ConnectionError> {
+            Ok(())
+        }
+
+        fn step_in(&mut self) -> Result<(), ConnectionError> {
+            Ok(())
+        }
+
+        fn step_out(&mut self) -> Result<(), ConnectionError> {
+            Ok(())
+        }
+
+        fn disconnect(&mut self) -> Result<(), ConnectionError> {
+            Ok(())
+        }
+    }
+
+    fn make_test_adapter() -> UnrealscriptAdapter {
         let adapter = UnrealscriptAdapter::new(
             make_client(),
-            ClientConfig::default(),
-            UnrealChannel::new(rrx, erx, ctx),
+            ClientConfig::new(),
+            Box::new(MockConnection {}),
+            None,
         );
 
-        (adapter, rtx, etx, crx)
+        adapter
     }
 
     #[test]
@@ -934,9 +1030,9 @@ mod tests {
         assert_eq!(qual, "MyPackage.SomeClass")
     }
 
-    #[tokio::test]
-    async fn add_breakpoint_registers_class() {
-        let (mut adapter, a, b, c) = make_test_adapter();
+    #[test]
+    fn add_breakpoint_registers_class() {
+        let mut adapter = make_test_adapter();
         let args = SetBreakpointsArguments {
             source: Source {
                 path: Some(GOOD_PATH.to_string()),
@@ -962,7 +1058,7 @@ mod tests {
 
     #[test]
     fn add_multiple_breakpoints() {
-        let (mut adapter, _, _, _) = make_test_adapter();
+        let mut adapter = make_test_adapter();
         let args = SetBreakpointsArguments {
             source: Source {
                 path: Some(GOOD_PATH.to_string()),
@@ -991,7 +1087,7 @@ mod tests {
 
     #[test]
     fn reset_breakpoints() {
-        let (mut adapter, _rtx, _etx, _crx) = make_test_adapter();
+        let mut adapter = make_test_adapter();
         let mut args = SetBreakpointsArguments {
             source: Source {
                 path: Some(GOOD_PATH.to_string()),

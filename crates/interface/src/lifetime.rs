@@ -45,7 +45,7 @@ use std::{
     thread,
 };
 
-use common::{UnrealCommand, UnrealEvent, DEFAULT_PORT};
+use common::{UnrealCommand, UnrealInterfaceMessage, DEFAULT_PORT};
 use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
 use futures::prelude::*;
 use tokio::{
@@ -186,8 +186,10 @@ async fn handle_connection(
     );
 
     let delimiter = FramedWrite::new(writer, LengthDelimitedCodec::new());
-    let mut serializer =
-        tokio_serde::SymmetricallyFramed::new(delimiter, SymmetricalJson::<UnrealEvent>::default());
+    let mut serializer = tokio_serde::SymmetricallyFramed::new(
+        delimiter,
+        SymmetricalJson::<UnrealInterfaceMessage>::default(),
+    );
 
     loop {
         select! {

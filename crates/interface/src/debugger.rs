@@ -1,4 +1,4 @@
-use ipmpsc::SharedRingBuffer;
+use futures::executor;
 use std::ffi::{c_char, CStr};
 use std::ptr;
 use textcode::iso8859_1;
@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use common::{
     Breakpoint, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent,
-    UnrealResponse, Variable, VariableIndex,
+    UnrealInterfaceMessage, UnrealResponse, Variable, VariableIndex,
 };
 use common::{Frame, WatchKind};
 
@@ -23,8 +23,7 @@ pub struct Debugger {
     user_watches: Vec<Watch>,
     callstack: Vec<Frame>,
     current_object_name: Option<String>,
-    event_channel: Option<tokio::sync::mpsc::Sender<UnrealEvent>>,
-    response_channel: Option<ipmpsc::Sender>,
+    response_channel: Option<tokio::sync::mpsc::Sender<UnrealInterfaceMessage>>,
     saw_show_dll: bool,
     pending_break_event: bool,
     current_line: i32,
@@ -158,7 +157,6 @@ impl Debugger {
             }],
             callstack: Vec::new(),
             current_object_name: None,
-            event_channel: None,
             response_channel: None,
             saw_show_dll: false,
             pending_break_event: false,
@@ -190,13 +188,6 @@ impl Debugger {
         command: UnrealCommand,
     ) -> Result<CommandAction, DebuggerError> {
         match command {
-            UnrealCommand::Initialize(path) => {
-                log::trace!("handle_command: initialize");
-                let buf =
-                    SharedRingBuffer::open(&path).or(Err(DebuggerError::InitializeFailure))?;
-                self.response_channel = Some(ipmpsc::Sender::new(buf));
-                Ok(CommandAction::Nothing)
-            }
             UnrealCommand::AddBreakpoint(bp) => {
                 let str = format!("addbreakpoint {} {}", bp.qualified_name, bp.line);
                 log::trace!("handle_command: {str}");
@@ -211,7 +202,7 @@ impl Debugger {
                 // A stack trace request can be handled without talking to unreal: we
                 // just return the current call stack state.
                 let response = self.handle_stacktrace_request(&stack);
-                self.send_response(&UnrealResponse::StackTrace(response))?;
+                self.send_response(UnrealResponse::StackTrace(response))?;
 
                 // This request has been completely handled, no need for the caller to invoke the
                 // callback.
@@ -220,14 +211,14 @@ impl Debugger {
             UnrealCommand::WatchCount(kind, parent) => {
                 log::trace!("WatchCount: {kind:?}");
                 let count = self.watch_count(kind, parent.into());
-                self.send_response(&UnrealResponse::WatchCount(count))?;
+                self.send_response(UnrealResponse::WatchCount(count))?;
                 Ok(CommandAction::Nothing)
             }
             UnrealCommand::Frame(idx) => {
                 log::trace!("Frame: {idx}");
                 let frame = self.callstack.iter().nth_back(idx.into());
                 log::trace!("The {idx}th frame is {frame:#?}");
-                self.send_response(&UnrealResponse::Frame(frame.cloned()))?;
+                self.send_response(UnrealResponse::Frame(frame.cloned()))?;
                 Ok(CommandAction::Nothing)
             }
             UnrealCommand::Variables(kind, frame, parent, start, count) => {
@@ -241,7 +232,7 @@ impl Debugger {
                     // variables list -- hopefully we can recover.
                     if self.pending_variable_request.is_some() {
                         log::error!("Variable request for a different stack frame while a change is still pending!");
-                        self.send_response(&UnrealResponse::Variables(vec![]))?;
+                        self.send_response(UnrealResponse::Variables(vec![]))?;
                         return Ok(CommandAction::Nothing);
                     }
 
@@ -251,7 +242,7 @@ impl Debugger {
                     let frame_id: usize = frame.into();
                     if frame_id > self.callstack.len() {
                         log::error!("Variable request stack frame {frame_id} is out of  range.");
-                        self.send_response(&UnrealResponse::Variables(vec![]))?;
+                        self.send_response(UnrealResponse::Variables(vec![]))?;
                         return Ok(CommandAction::Nothing);
                     }
 
@@ -283,7 +274,7 @@ impl Debugger {
                 if !self.user_watches.is_empty() {
                     for idx in &self.user_watches[0].children {
                         if self.user_watches[*idx].name == expr {
-                            self.send_response(&UnrealResponse::Evaluate(Some(
+                            self.send_response(UnrealResponse::Evaluate(Some(
                                 self.user_watches[*idx].to_variable(*idx),
                             )))?;
                             return Ok(CommandAction::Nothing);
@@ -343,7 +334,6 @@ impl Debugger {
         // Drop our references to the communications channels. The main loop thread is still
         // running but should receive a disconnect from the TCP socket soon and this will
         // cause us to go back and wait for another connection.
-        self.event_channel.take();
         self.response_channel.take();
     }
 
@@ -373,7 +363,7 @@ impl Debugger {
                 "Variable: Parent index out of range. Got {idx} but size is {}",
                 list.len()
             );
-            self.send_response(&UnrealResponse::Variables(vec![]))?;
+            self.send_response(UnrealResponse::Variables(vec![]))?;
             return Ok(());
         }
 
@@ -398,21 +388,25 @@ impl Debugger {
             .collect();
 
         if deferred {
-            self.send_response(&UnrealResponse::DeferredVariables(vars))?;
+            self.send_response(UnrealResponse::DeferredVariables(vars))?;
         } else {
-            self.send_response(&UnrealResponse::Variables(vars))?;
+            self.send_response(UnrealResponse::Variables(vars))?;
         }
         Ok(())
     }
 
     /// Send a response message. Since responses are always in reaction to a command, this requires
     /// a connected response channel and it is a logic error for this to not exist.
-    pub fn send_response(&mut self, response: &UnrealResponse) -> Result<(), DebuggerError> {
-        self.response_channel
-            .as_mut()
-            .ok_or(DebuggerError::NotConnected)?
-            .send(response)
-            .or(Err(DebuggerError::NotConnected))?;
+    pub fn send_response(&mut self, response: UnrealResponse) -> Result<(), DebuggerError> {
+        executor::block_on(async {
+            self.response_channel
+                .as_mut()
+                .ok_or(DebuggerError::NotConnected)?
+                .send(UnrealInterfaceMessage::Response(response))
+                .await
+                .or(Err(DebuggerError::NotConnected))?;
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -453,8 +447,10 @@ impl Debugger {
             // This is a true break. If we're connected send the Stopped event to the adapter. If
             // we're not connected yet set a flag indicating that we're stopped so we can tell
             // the adapter about this state when it does connect.
-            if let Some(channel) = &mut self.event_channel {
-                if let Err(e) = channel.blocking_send(UnrealEvent::Stopped) {
+            if let Some(channel) = &mut self.response_channel {
+                if let Err(e) =
+                    channel.blocking_send(UnrealInterfaceMessage::Event(UnrealEvent::Stopped))
+                {
                     log::error!("Sending stopped event failed: {e}");
                 }
             } else {
@@ -562,7 +558,7 @@ impl Debugger {
                             if var.is_none() {
                                 log::error!("User watchlist unlocked from a pending user watch but watchlist is empty!");
                             }
-                            self.send_response(&UnrealResponse::Evaluate(var))
+                            self.send_response(UnrealResponse::Evaluate(var))
                                 .unwrap_or_else(|_| {
                                     log::error!("Failed to send response for user watch");
                                 });
@@ -595,7 +591,7 @@ impl Debugger {
             line,
         };
         log::trace!("Added breakpoint at {}:{}", bp.qualified_name, bp.line);
-        if let Err(e) = self.send_response(&UnrealResponse::BreakpointAdded(bp)) {
+        if let Err(e) = self.send_response(UnrealResponse::BreakpointAdded(bp)) {
             log::error!("Sending BreakpointAdded response failed: {e}");
         }
     }
@@ -607,7 +603,7 @@ impl Debugger {
             line,
         };
         log::trace!("Removed breakpoint at {}:{}", bp.qualified_name, bp.line);
-        if let Err(e) = self.send_response(&UnrealResponse::BreakpointRemoved(bp)) {
+        if let Err(e) = self.send_response(UnrealResponse::BreakpointRemoved(bp)) {
             log::error!("Sending BreakpointRemoved response failed: {e}");
         }
     }
@@ -699,12 +695,14 @@ impl Debugger {
             return;
         }
 
-        if let Some(sender) = &mut self.event_channel {
+        if let Some(sender) = &mut self.response_channel {
             log::trace!("Add to log: {str}");
 
             // Unreal does not add newlines to log messages, add one for readability.
             str.push_str("\r\n");
-            if let Err(e) = sender.blocking_send(UnrealEvent::Log(str)) {
+            if let Err(e) =
+                sender.blocking_send(UnrealInterfaceMessage::Event(UnrealEvent::Log(str)))
+            {
                 log::error!("Sending log failed: {e}");
             }
         } else {
@@ -793,8 +791,8 @@ impl Debugger {
 
     /// A new connection has been established from the adapter. Record the tcp stream used to send
     /// events.
-    pub fn new_connection(&mut self, tx: mpsc::Sender<UnrealEvent>) -> () {
-        self.event_channel = Some(tx);
+    pub fn new_connection(&mut self, tx: mpsc::Sender<UnrealInterfaceMessage>) -> () {
+        self.response_channel = Some(tx);
 
         // The debugger stopped before we connected (e.g. due to -autoDebug). Send a stopped
         // event to let it know about this.
@@ -886,15 +884,16 @@ mod tests {
     fn log_sends_line() {
         let mut dbg = Debugger::new();
         let (tx, mut rx) = mpsc::channel(1);
-        dbg.event_channel = Some(tx);
+        dbg.response_channel = Some(tx);
         let str = "This is a log line\0";
         dbg.add_line_to_log(str.as_ptr() as *const i8);
 
-        let destr: UnrealEvent = rx.blocking_recv().unwrap();
-        match destr {
+        match rx.blocking_recv().unwrap() {
             // Compare the strings. Ignore the null byte in our sending string, and ignore the \r\n
             // appended to the log line in the event.
-            UnrealEvent::Log(s) => assert_eq!(str[..str.len() - 1], s[..s.len() - 2]),
+            UnrealInterfaceMessage::Event(UnrealEvent::Log(s)) => {
+                assert_eq!(str[..str.len() - 1], s[..s.len() - 2])
+            }
             _ => panic!("Expected a log"),
         };
     }
