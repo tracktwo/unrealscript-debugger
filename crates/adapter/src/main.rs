@@ -1,4 +1,4 @@
-use adapter::disconnected_adapter::DisconnectedAdapter;
+use adapter::disconnected_adapter::{DisconnectedAdapter, DisconnectedAdapterError};
 use flexi_logger::{Duplicate, FileSpec, Logger};
 
 use adapter::async_client::AsyncClient;
@@ -33,11 +33,15 @@ async fn main() {
                     }
                 };
             }
-            Err(a) => {
+            Err(DisconnectedAdapterError::NoConnection(a)) => {
                 // We failed to connect, or launched without attempting connection.
                 // If the former the client will just kill this process. If the
                 // latter then loop again and wait for an attach message.
                 adapter = a;
+            }
+            Err(DisconnectedAdapterError::IoError(e)) => {
+                log::error!("Received fatal error {e} while connecting. Aborting");
+                std::process::exit(1);
             }
         }
     }

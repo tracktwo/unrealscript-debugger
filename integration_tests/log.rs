@@ -6,7 +6,7 @@ mod fixture;
 /// Test sending a log line from the interface to the adapter.
 #[tokio::test(flavor = "multi_thread")]
 async fn simple_log() {
-    let (_adapter, mut dbg, mut _comm) = fixture::setup().await;
+    let (adapter, mut dbg, mut _comm) = fixture::setup().await;
 
     tokio::task::spawn(async move {
         // Send a log event
@@ -14,14 +14,14 @@ async fn simple_log() {
     });
 
     // The adapter should receive the log event and dispatch it to the event sender.
-    // let evt = receiver.recv().unwrap();
-    // match evt.body {
-    //     EventBody::Output(obody) => {
-    //         assert!(matches!(
-    //             obody.category.unwrap(),
-    //             OutputEventCategory::Stdout
-    //         ));
-    //     }
-    //     b => panic!("Expected an output event but got {b:?}"),
-    // }
+    let evt = adapter.client().events[0];
+    match evt.body {
+        EventBody::Output(obody) => {
+            assert!(matches!(
+                obody.category.unwrap(),
+                OutputEventCategory::Stdout
+            ));
+        }
+        b => panic!("Expected an output event but got {b:?}"),
+    }
 }

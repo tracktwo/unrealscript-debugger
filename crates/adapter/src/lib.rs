@@ -141,6 +141,12 @@ impl From<ConnectionError> for UnrealscriptAdapterError {
     }
 }
 
+impl From<std::io::Error> for UnrealscriptAdapterError {
+    fn from(_: std::io::Error) -> Self {
+        UnrealscriptAdapterError::NotConnected
+    }
+}
+
 type Error = UnrealscriptAdapterError;
 
 impl UnrealscriptAdapter {
@@ -170,6 +176,10 @@ impl UnrealscriptAdapter {
             .unwrap()
             .blocking_send(evt)
             .expect("Receiver cannot drop.");
+    }
+
+    pub fn client(&self) -> &AsyncClient {
+        &self.client
     }
 
     /// Main loop of the adapter process. This monitors several different communications
@@ -206,7 +216,7 @@ impl UnrealscriptAdapter {
                         Ok(body) => Response::make_success(&request, body),
                         Err(e) => Response::make_error(&request, e.to_error_message()),
                     };
-                    self.client.respond(response).await;
+                    self.client.respond(response)?;
                 }
                 evt = self.connection.event_receiver().recv() => {
                     // We received an event from the interface. Translate it to
@@ -215,7 +225,7 @@ impl UnrealscriptAdapter {
                         Some(evt) => {
                             log::trace!("Received unreal event {evt:?}");
                             if let Some(dap_event) = self.process_event(evt) {
-                                self.client.send_event(dap_event).await;
+                                self.client.send_event(dap_event)?;
                             }
                         },
                         None => {
@@ -225,7 +235,7 @@ impl UnrealscriptAdapter {
                             log::info!("Debuggee has closed the event connection socket.");
                             self.client.send_event(Event{
                                 body: EventBody::Terminated(None)
-                            }).await;
+                            })?;
                             return Ok(());
                         }
                     };
@@ -236,7 +246,7 @@ impl UnrealscriptAdapter {
                             log::info!("Shutdown message received. Stopping adapter.");
                             self.client.send_event(Event{
                                 body: EventBody::Terminated(None)
-                            }).await;
+                            })?;
                             return Ok(());
                         },
                         Err(broadcast::error::RecvError::Closed) => unreachable!(),
@@ -249,7 +259,7 @@ impl UnrealscriptAdapter {
                     match evt {
                         Some(evt) => {
                             log::trace!("Dispatching event: {evt:?}");
-                            self.client.send_event(evt).await;
+                            self.client.send_event(evt)?;
                         },
                         None => {
                             // TODO Rework errors, this probably logs twice and should instead
@@ -257,7 +267,7 @@ impl UnrealscriptAdapter {
                             log::error!("Event channel closed!");
                             self.client.send_event(Event{
                                 body: EventBody::Terminated(None)
-                            }).await;
+                            })?;
                             return Err(UnrealscriptAdapterError::NotConnected);
                         }
                     };

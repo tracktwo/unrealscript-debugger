@@ -30,6 +30,36 @@ pub struct DisconnectedAdapter {
     config: ClientConfig,
 }
 
+/// Error cases for a disconnected adapter.
+///
+/// The disconnected adapter attempts to transform itself into a connected adapter.
+/// This can fail in either a recoverable or unrecoverable way:
+///
+/// - If we fail to read or write from the client connection the error is fatal and we
+/// cannot recover since there is no communications channel with the client to give us
+/// future instructions.
+/// - If we fail to launch or attach, receive a disconnect request from the client, or
+/// receive unexpected protocol messages from the client we may fail to connect but
+/// can continue processing messages and may be able to connect in the future.
+pub enum DisconnectedAdapterError {
+    /// Represents a fatal error communicating with the client. There is no way to
+    /// continue to attempt connection since no more instructions will come from the
+    /// client or we can't send any responses. The adapter should give up when
+    /// receiving this error.
+    IoError(std::io::Error),
+
+    /// We failed to connect, but still have valid commmunications with the client.
+    /// We may be able to retry, so this error mode returns the same disconnected
+    /// adapter so we can try again.
+    NoConnection(DisconnectedAdapter),
+}
+
+impl From<std::io::Error> for DisconnectedAdapterError {
+    fn from(e: std::io::Error) -> Self {
+        DisconnectedAdapterError::IoError(e)
+    }
+}
+
 impl DisconnectedAdapter {
     /// Create a new disconnected adapter for the given client.
     pub fn new(client: AsyncClient) -> Self {
@@ -47,24 +77,25 @@ impl DisconnectedAdapter {
     /// Process protocol messages until we have launched or connected to
     /// the debuggee process, then return an UnrealscriptAdapter instance to
     /// manage the rest of the session.
-    pub async fn connect(mut self) -> Result<UnrealscriptAdapter, DisconnectedAdapter> {
+    pub async fn connect(mut self) -> Result<UnrealscriptAdapter, DisconnectedAdapterError> {
         loop {
             select! {
                 request = self.client.next() => {
                     match &request.command {
-                        Command::Initialize(args) => self.initialize(&request, &args).await,
+                        Command::Initialize(args) => self.initialize(&request, &args)?,
                         Command::Attach(args) => return self.attach(&request, &args).await,
                         Command::Launch(args) => return self.launch(&request, &args).await,
                         Command::Disconnect(_) => {
                             log::info!("Received disconnect message during connection phase.");
-                            return Err(self);
+                            return Err(DisconnectedAdapterError::NoConnection(self));
                         },
                         // No other requests are expected in the disconnected state.
                         cmd => {
                             log::error!("Unexpected command {} in disconnected state.", cmd.name().to_string());
+                            //
                             self.client.respond(Response::make_error(&request,
                                     UnrealscriptAdapterError::UnhandledCommand(cmd.name().to_string()).to_error_message()
-                            )).await;
+                            ))?;
                         }
                     };
                 }
@@ -75,7 +106,11 @@ impl DisconnectedAdapter {
     /// Handle an initialize request
     ///
     /// Sets up the client configuration and returns a response.
-    async fn initialize(&mut self, req: &Request, args: &InitializeArguments) -> () {
+    fn initialize(
+        &mut self,
+        req: &Request,
+        args: &InitializeArguments,
+    ) -> Result<(), DisconnectedAdapterError> {
         // Build our client config.
         self.config = ClientConfig {
             one_based_lines: args.lines_start_at1.unwrap_or(true),
@@ -85,17 +120,16 @@ impl DisconnectedAdapter {
         };
 
         // Send the response.
-        self.client
-            .respond(Response::make_success(
-                &req,
-                ResponseBody::Initialize(Some(Capabilities {
-                    supports_configuration_done_request: Some(true),
-                    supports_delayed_stack_trace_loading: Some(true),
-                    supports_value_formatting_options: Some(false),
-                    ..Default::default()
-                })),
-            ))
-            .await;
+        self.client.respond(Response::make_success(
+            &req,
+            ResponseBody::Initialize(Some(Capabilities {
+                supports_configuration_done_request: Some(true),
+                supports_delayed_stack_trace_loading: Some(true),
+                supports_value_formatting_options: Some(false),
+                ..Default::default()
+            })),
+        ))?;
+        Ok(())
     }
 
     /// Connect to the debugger interface. When connected this will send an 'initialized' event to
@@ -119,7 +153,7 @@ impl DisconnectedAdapter {
         mut self,
         req: &Request,
         args: &AttachRequestArguments,
-    ) -> Result<UnrealscriptAdapter, DisconnectedAdapter> {
+    ) -> Result<UnrealscriptAdapter, DisconnectedAdapterError> {
         log::info!("Attach request");
         let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
         self.config.source_roots =
@@ -130,8 +164,7 @@ impl DisconnectedAdapter {
                 // Connection succeeded: Respond with a success response and return
                 // the conneted adapter.
                 self.client
-                    .respond(Response::make_success(&req, ResponseBody::Attach))
-                    .await;
+                    .respond(Response::make_success(&req, ResponseBody::Attach))?;
 
                 return Ok(UnrealscriptAdapter::new(
                     self.client,
@@ -143,9 +176,8 @@ impl DisconnectedAdapter {
             Err(e) => {
                 // Connection failed.
                 self.client
-                    .respond(Response::make_error(&req, e.to_error_message()))
-                    .await;
-                return Err(self);
+                    .respond(Response::make_error(&req, e.to_error_message()))?;
+                return Err(DisconnectedAdapterError::NoConnection(self));
             }
         }
     }
@@ -212,7 +244,7 @@ impl DisconnectedAdapter {
         mut self,
         req: &Request,
         args: &LaunchRequestArguments,
-    ) -> Result<UnrealscriptAdapter, DisconnectedAdapter> {
+    ) -> Result<UnrealscriptAdapter, DisconnectedAdapterError> {
         // Unless instructed otherwise we're going to debug the launched process, so pass
         // '-autoDebug' and try to connect. If 'no_debug' is 'true' then we're just launching and
         // will not try to debug. We could get a later 'attach' request, in which case we can
@@ -232,8 +264,7 @@ impl DisconnectedAdapter {
                         Ok(connection) => {
                             // Send a response ack for the launch request.
                             self.client
-                                .respond(Response::make_success(req, ResponseBody::Launch))
-                                .await;
+                                .respond(Response::make_success(req, ResponseBody::Launch))?;
                             self.config.source_roots =
                                 Self::extract_source_roots(&args.other).unwrap_or_else(|| vec![]);
 
@@ -248,9 +279,8 @@ impl DisconnectedAdapter {
                             // We launched, but failed to connect.
                             log::error!("Successfully launched program but failed to connect: {e}");
                             self.client
-                                .respond(Response::make_error(&req, e.to_error_message()))
-                                .await;
-                            return Err(self);
+                                .respond(Response::make_error(&req, e.to_error_message()))?;
+                            return Err(DisconnectedAdapterError::NoConnection(self));
                         }
                     }
                 } else {
@@ -258,17 +288,15 @@ impl DisconnectedAdapter {
                     // client, but stay in the disconnected state.
                     log::info!("Launch request succeeded but autodebug is disabled. Remaining disconnected.");
                     self.client
-                        .respond(Response::make_success(req, ResponseBody::Launch))
-                        .await;
-                    return Err(self);
+                        .respond(Response::make_success(req, ResponseBody::Launch))?;
+                    return Err(DisconnectedAdapterError::NoConnection(self));
                 }
             }
             Err(e) => {
                 // We failed to launch the debuggee. Send an error response
                 self.client
-                    .respond(Response::make_error(&req, e.to_error_message()))
-                    .await;
-                return Err(self);
+                    .respond(Response::make_error(&req, e.to_error_message()))?;
+                return Err(DisconnectedAdapterError::NoConnection(self));
             }
         }
     }
