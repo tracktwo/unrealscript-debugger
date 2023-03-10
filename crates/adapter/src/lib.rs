@@ -212,11 +212,22 @@ impl UnrealscriptAdapter {
         loop {
             select! {
                 request = self.client.next() => {
-                    let response = match self.accept(&request) {
-                        Ok(body) => Response::make_success(&request, body),
-                        Err(e) => Response::make_error(&request, e.to_error_message()),
-                    };
-                    self.client.respond(response)?;
+                    match request {
+                        Ok(Some(request)) => {
+                            let response = match self.accept(&request) {
+                                Ok(body) => Response::make_success(&request, body),
+                                Err(e) => Response::make_error(&request, e.to_error_message()),
+                            };
+                            self.client.respond(response)?;
+                        },
+                        // TODO do these error types make sense? Ok(None) means the client
+                        // closed the connection, so we can make no more progress.
+                        // Err means we had some kind of protocol error. We can't even respond
+                        // to tell the client we failed to parse the message since we don't have
+                        // a request sequence number to use in that response.
+                        Ok(None) => return Err(UnrealscriptAdapterError::NotConnected),
+                        Err(_) => return Err(UnrealscriptAdapterError::NotConnected),
+                    }
                 }
                 evt = self.connection.event_receiver().recv() => {
                     // We received an event from the interface. Translate it to

@@ -81,23 +81,30 @@ impl DisconnectedAdapter {
         loop {
             select! {
                 request = self.client.next() => {
-                    match &request.command {
-                        Command::Initialize(args) => self.initialize(&request, &args)?,
-                        Command::Attach(args) => return self.attach(&request, &args).await,
-                        Command::Launch(args) => return self.launch(&request, &args).await,
-                        Command::Disconnect(_) => {
-                            log::info!("Received disconnect message during connection phase.");
-                            return Err(DisconnectedAdapterError::NoConnection(self));
+                    match request {
+                        Ok(Some(request)) => {
+                            match &request.command {
+                                Command::Initialize(args) => self.initialize(&request, &args)?,
+                                Command::Attach(args) => return self.attach(&request, &args).await,
+                                Command::Launch(args) => return self.launch(&request, &args).await,
+                                Command::Disconnect(_) => {
+                                    log::info!("Received disconnect message during connection phase.");
+                                    return Err(DisconnectedAdapterError::NoConnection(self));
+                                },
+                                // No other requests are expected in the disconnected state.
+                                cmd => {
+                                    log::error!("Unexpected command {} in disconnected state.", cmd.name().to_string());
+                                    //
+                                    self.client.respond(Response::make_error(&request,
+                                            UnrealscriptAdapterError::UnhandledCommand(cmd.name().to_string()).to_error_message()
+                                    ))?;
+                                }
+                            }
                         },
-                        // No other requests are expected in the disconnected state.
-                        cmd => {
-                            log::error!("Unexpected command {} in disconnected state.", cmd.name().to_string());
-                            //
-                            self.client.respond(Response::make_error(&request,
-                                    UnrealscriptAdapterError::UnhandledCommand(cmd.name().to_string()).to_error_message()
-                            ))?;
-                        }
-                    };
+                        Ok(None) => return Err(DisconnectedAdapterError::IoError(
+                            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "Client closed connection."))),
+                        Err(e) => return Err(DisconnectedAdapterError::IoError(e)),
+                    }
                 }
             }
         }
