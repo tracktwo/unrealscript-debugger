@@ -148,8 +148,6 @@ impl From<std::io::Error> for UnrealscriptAdapterError {
     }
 }
 
-type Error = UnrealscriptAdapterError;
-
 impl<C: AsyncClient + Unpin> Drop for UnrealscriptAdapter<C> {
     fn drop(&mut self) {
         match self.child.take() {
@@ -208,7 +206,11 @@ where
     /// - Watch the control queue for shutdown messages, closing the loop if we
     ///   get one.
     ///
-    pub async fn process_messages(&mut self) -> Result<(), UnrealscriptAdapterError> {
+    /// # Errors
+    ///
+    /// This function returns an io error only in unrecoverable scenarios,
+    /// typically if the client or interface communication channels have closed.
+    pub async fn process_messages(&mut self) -> Result<(), std::io::Error> {
         // Set up the control channel
         let (ctx, mut crx) = broadcast::channel(10);
         self.control = Some(ctx);
@@ -232,17 +234,30 @@ where
                         Some(Ok(request)) => {
                             let response = match self.accept(&request) {
                                 Ok(body) => Response::make_success(&request, body),
-                                Err(e) => Response::make_error(&request, e.to_error_message()),
+                                // An error from the request processing code is recoverable. Send
+                                // an error response to the client so it may display it.
+                                Err(e) => {
+                                    log::error!("Error processing request: {e}");
+                                    Response::make_error(&request, e.to_error_message())
+                                },
                             };
+                            // Failing to send the response is unrecoverable. This indicates
+                            // the client connection has closed so we can never send any more
+                            // responses or events.
                             self.client.respond(response)?;
                         },
-                        // TODO do these error types make sense? Ok(None) means the client
-                        // closed the connection, so we can make no more progress.
-                        // Err means we had some kind of protocol error. We can't even respond
-                        // to tell the client we failed to parse the message since we don't have
-                        // a request sequence number to use in that response.
-                        None => return Err(UnrealscriptAdapterError::NotConnected),
-                        Some(Err(_)) => return Err(UnrealscriptAdapterError::NotConnected),
+                        // A 'None' from the client means the connection is closed and no
+                        // more requests will come. Seeing this without a previous disconnect
+                        // message is an error (e.g. the editor crashed?). We can return and
+                        // shut down -- this is unrecoverable because we no longer have a
+                        // connection to the client.
+                        None => return Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "Client request stream has closed")),
+                        // An error response from the client indicates some kind of framing or
+                        // protocol error at the DAP level. This is not generally recoverable
+                        // since the client is waiting for a response to the message that we
+                        // failed to decode, and we can't prepare that response because we don't
+                        // know the request id to use in it.
+                        Some(Err(e)) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
                     }
                 }
                 evt = self.connection.event_receiver().recv() => {
@@ -254,6 +269,9 @@ where
                             if let Some(dap_event) = self.process_event(evt) {
                                 self.client.send_event(dap_event)?;
                             }
+                            // Receiving 'None' from process_event is not an error,
+                            // it can indicate that we have received a shutdown event
+                            // and this will be sent in the control queue handler below.
                         },
                         None => {
                             // The remote side has closed the connection, so we have to
@@ -289,13 +307,9 @@ where
                             self.client.send_event(evt)?;
                         },
                         None => {
-                            // TODO Rework errors, this probably logs twice and should instead
-                            // return the message in the error.
-                            log::error!("Event channel closed!");
-                            self.client.send_event(Event{
-                                body: EventBody::Terminated(None)
-                            })?;
-                            return Err(UnrealscriptAdapterError::NotConnected);
+                            // This should not be possible since self contains the sending end of
+                            // the channel.
+                            unreachable!("The event channel cannot close while the adapter is running.");
                         }
                     };
                 }
@@ -304,7 +318,7 @@ where
     }
 
     /// Process a DAP request, returning a response body.
-    pub fn accept(&mut self, request: &Request) -> Result<ResponseBody, Error> {
+    pub fn accept(&mut self, request: &Request) -> Result<ResponseBody, UnrealscriptAdapterError> {
         log::info!("Got request {request:#?}");
         match &request.command {
             Command::SetBreakpoints(args) => self.set_breakpoints(args),
@@ -343,8 +357,9 @@ where
             .path
             .as_ref()
             .expect("Clients should provide sources as paths");
-        let class_info =
-            ClassInfo::make(path.to_string()).or(Err(Error::InvalidFilename(path.to_string())))?;
+        let class_info = ClassInfo::make(path.to_string()).or(Err(
+            UnrealscriptAdapterError::InvalidFilename(path.to_string()),
+        ))?;
         let mut qualified_class_name = class_info.qualify();
 
         log::trace!("setting breakpoints for {qualified_class_name}");

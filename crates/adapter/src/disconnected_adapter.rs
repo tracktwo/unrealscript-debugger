@@ -157,6 +157,11 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     ///
     /// Consumes the disconnected adapter and returns a connected one if it can connect,
     /// or returns self if connection fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an io error if we are unable to send a response to the client's output
+    /// channel.
     async fn attach(
         mut self,
         req: &Request,
@@ -166,7 +171,6 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
         self.config.source_roots =
             Self::extract_source_roots(&args.other).unwrap_or_else(|| vec![]);
-        // TODO this early return is wrong: we have to send a response.
         match self.connect_to_interface(port).await {
             Ok(connection) => {
                 // Connection succeeded: Respond with a success response and return

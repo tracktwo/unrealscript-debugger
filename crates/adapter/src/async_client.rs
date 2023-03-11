@@ -64,6 +64,19 @@ where
         self.seq
     }
 
+    /// Synchronously end a message to the client.
+    ///
+    /// `msg` is a json-encoded DAP message. This function will prepend the required
+    /// header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an io::Error if the message cannot be written to the client's output
+    /// stream.
+    ///
+    /// # Panics
+    ///
+    /// May panic if the given message is not valid UTF-8.
     fn send_message(&mut self, msg: &[u8]) -> Result<(), Error> {
         let len = msg.len();
         let header = format!("Content-Length: {len}\r\n\r\n");
@@ -93,6 +106,11 @@ where
         self.input.next()
     }
 
+    /// Send a response to the client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an IO error only if the client's channel is closed.
     fn respond(&mut self, response: Response) -> Result<(), Error> {
         let response_message = ResponseProtocolMessage {
             seq: self.next_seq(),
@@ -103,6 +121,11 @@ where
         self.send_message(&payload)
     }
 
+    /// Send an event to the client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an IO error only if the the client's channel is closed.
     fn send_event(&mut self, event: Event) -> Result<(), Error> {
         let event_message = EventProtocolMessage {
             seq: self.next_seq(),
