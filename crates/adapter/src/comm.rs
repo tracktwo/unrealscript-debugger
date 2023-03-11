@@ -73,7 +73,7 @@ macro_rules! expect_response {
 /// that will never come. The protocol is very simple, so any out of sync error is
 /// likely to be an interrupted connection which will close the channel and unblock
 /// the caller anyway.
-pub trait Connection {
+pub trait Connection: Send {
     fn send_command(&mut self, command: UnrealCommand) -> Result<(), ConnectionError>;
     fn next_response(&mut self) -> Result<UnrealResponse, ConnectionError>;
     fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent>;

@@ -25,8 +25,8 @@ use crate::{
 
 /// A representation of a disconnected adapter. This manages the portion of the
 /// protocol up to the point where a connection to the debuggee is established.
-pub struct DisconnectedAdapter {
-    client: AsyncClient<tokio::io::Stdin, tokio::io::Stdout>,
+pub struct DisconnectedAdapter<C: AsyncClient + Unpin> {
+    client: C,
     config: ClientConfig,
 }
 
@@ -41,7 +41,7 @@ pub struct DisconnectedAdapter {
 /// - If we fail to launch or attach, receive a disconnect request from the client, or
 /// receive unexpected protocol messages from the client we may fail to connect but
 /// can continue processing messages and may be able to connect in the future.
-pub enum DisconnectedAdapterError {
+pub enum DisconnectedAdapterError<C: AsyncClient + Unpin> {
     /// Represents a fatal error communicating with the client. There is no way to
     /// continue to attempt connection since no more instructions will come from the
     /// client or we can't send any responses. The adapter should give up when
@@ -51,18 +51,18 @@ pub enum DisconnectedAdapterError {
     /// We failed to connect, but still have valid commmunications with the client.
     /// We may be able to retry, so this error mode returns the same disconnected
     /// adapter so we can try again.
-    NoConnection(DisconnectedAdapter),
+    NoConnection(DisconnectedAdapter<C>),
 }
 
-impl From<std::io::Error> for DisconnectedAdapterError {
+impl<C: AsyncClient + Unpin> From<std::io::Error> for DisconnectedAdapterError<C> {
     fn from(e: std::io::Error) -> Self {
         DisconnectedAdapterError::IoError(e)
     }
 }
 
-impl DisconnectedAdapter {
+impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     /// Create a new disconnected adapter for the given client.
-    pub fn new(client: AsyncClient<tokio::io::Stdin, tokio::io::Stdout>) -> Self {
+    pub fn new(client: C) -> Self {
         DisconnectedAdapter {
             client,
             config: ClientConfig {
@@ -77,12 +77,12 @@ impl DisconnectedAdapter {
     /// Process protocol messages until we have launched or connected to
     /// the debuggee process, then return an UnrealscriptAdapter instance to
     /// manage the rest of the session.
-    pub async fn connect(mut self) -> Result<UnrealscriptAdapter, DisconnectedAdapterError> {
+    pub async fn connect(mut self) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
         loop {
             select! {
-                request = self.client.next() => {
+                request = self.client.next_request() => {
                     match request {
-                        Ok(Some(request)) => {
+                        Some(Ok(request)) => {
                             match &request.command {
                                 Command::Initialize(args) => self.initialize(&request, &args)?,
                                 Command::Attach(args) => return self.attach(&request, &args).await,
@@ -101,9 +101,9 @@ impl DisconnectedAdapter {
                                 }
                             }
                         },
-                        Ok(None) => return Err(DisconnectedAdapterError::IoError(
+                        Some(Err(e)) => return Err(DisconnectedAdapterError::IoError(e)),
+                        None => return Err(DisconnectedAdapterError::IoError(
                             std::io::Error::new(std::io::ErrorKind::ConnectionReset, "Client closed connection."))),
-                        Err(e) => return Err(DisconnectedAdapterError::IoError(e)),
                     }
                 }
             }
@@ -117,7 +117,7 @@ impl DisconnectedAdapter {
         &mut self,
         req: &Request,
         args: &InitializeArguments,
-    ) -> Result<(), DisconnectedAdapterError> {
+    ) -> Result<(), DisconnectedAdapterError<C>> {
         // Build our client config.
         self.config = ClientConfig {
             one_based_lines: args.lines_start_at1.unwrap_or(true),
@@ -160,7 +160,7 @@ impl DisconnectedAdapter {
         mut self,
         req: &Request,
         args: &AttachRequestArguments,
-    ) -> Result<UnrealscriptAdapter, DisconnectedAdapterError> {
+    ) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
         log::info!("Attach request");
         let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
         self.config.source_roots =
@@ -251,7 +251,7 @@ impl DisconnectedAdapter {
         mut self,
         req: &Request,
         args: &LaunchRequestArguments,
-    ) -> Result<UnrealscriptAdapter, DisconnectedAdapterError> {
+    ) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
         // Unless instructed otherwise we're going to debug the launched process, so pass
         // '-autoDebug' and try to connect. If 'no_debug' is 'true' then we're just launching and
         // will not try to debug. We could get a later 'attach' request, in which case we can

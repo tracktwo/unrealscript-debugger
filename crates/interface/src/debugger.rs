@@ -448,9 +448,11 @@ impl Debugger {
             // we're not connected yet set a flag indicating that we're stopped so we can tell
             // the adapter about this state when it does connect.
             if let Some(channel) = &mut self.response_channel {
-                if let Err(e) =
-                    channel.blocking_send(UnrealInterfaceMessage::Event(UnrealEvent::Stopped))
-                {
+                if let Err(e) = executor::block_on(async {
+                    channel
+                        .send(UnrealInterfaceMessage::Event(UnrealEvent::Stopped))
+                        .await
+                }) {
                     log::error!("Sending stopped event failed: {e}");
                 }
             } else {
@@ -700,9 +702,11 @@ impl Debugger {
 
             // Unreal does not add newlines to log messages, add one for readability.
             str.push_str("\r\n");
-            if let Err(e) =
-                sender.blocking_send(UnrealInterfaceMessage::Event(UnrealEvent::Log(str)))
-            {
+            if let Err(e) = executor::block_on(async {
+                sender
+                    .send(UnrealInterfaceMessage::Event(UnrealEvent::Log(str)))
+                    .await
+            }) {
                 log::error!("Sending log failed: {e}");
             }
         } else {

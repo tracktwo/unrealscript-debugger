@@ -13,12 +13,14 @@ tokio-stream = "0.1"
 tokio-serde = { version = "0.8", features = ["json"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
-ipmpsc = "0.5"
 thiserror = "1.0"
 bit_field = "0.10"
+memmem = "0.1"
+bytes = "1.4"
 dap = { path = "../../../dap-rs" }
 common.workspace = true
 interface.workspace = true
+
 
 [[bin]]
 path = "src/main.rs"

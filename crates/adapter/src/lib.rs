@@ -25,6 +25,7 @@ use dap::{
         Thread,
     },
 };
+use futures::executor;
 use std::fmt::Debug;
 use thiserror::Error;
 use tokio::{
@@ -69,8 +70,8 @@ impl ClientConfig {
 }
 
 /// A connected Unrealscript debug adapter.
-pub struct UnrealscriptAdapter {
-    client: AsyncClient<tokio::io::Stdin, tokio::io::Stdout>,
+pub struct UnrealscriptAdapter<C: AsyncClient + Unpin> {
+    client: C,
     config: ClientConfig,
     connection: Box<dyn Connection>,
     class_map: BTreeMap<String, ClassInfo>,
@@ -149,13 +150,16 @@ impl From<std::io::Error> for UnrealscriptAdapterError {
 
 type Error = UnrealscriptAdapterError;
 
-impl UnrealscriptAdapter {
+impl<C> UnrealscriptAdapter<C>
+where
+    C: AsyncClient + Unpin,
+{
     pub fn new(
-        client: AsyncClient<tokio::io::Stdin, tokio::io::Stdout>,
+        client: C,
         config: ClientConfig,
         connection: Box<dyn Connection>,
         child: Option<Child>,
-    ) -> UnrealscriptAdapter {
+    ) -> UnrealscriptAdapter<C> {
         let adapter = UnrealscriptAdapter {
             class_map: BTreeMap::new(),
             connection,
@@ -171,14 +175,11 @@ impl UnrealscriptAdapter {
 
     /// Enqueue an event to the adapter queue.
     fn queue_event(&mut self, evt: Event) -> () {
-        self.events
-            .as_ref()
-            .unwrap()
-            .blocking_send(evt)
+        executor::block_on(async { self.events.as_ref().unwrap().send(evt).await })
             .expect("Receiver cannot drop.");
     }
 
-    pub fn client(&self) -> &AsyncClient<tokio::io::Stdin, tokio::io::Stdout> {
+    pub fn client(&self) -> &C {
         &self.client
     }
 
@@ -211,9 +212,9 @@ impl UnrealscriptAdapter {
 
         loop {
             select! {
-                request = self.client.next() => {
+                request = self.client.next_request() => {
                     match request {
-                        Ok(Some(request)) => {
+                        Some(Ok(request)) => {
                             let response = match self.accept(&request) {
                                 Ok(body) => Response::make_success(&request, body),
                                 Err(e) => Response::make_error(&request, e.to_error_message()),
@@ -225,8 +226,8 @@ impl UnrealscriptAdapter {
                         // Err means we had some kind of protocol error. We can't even respond
                         // to tell the client we failed to parse the message since we don't have
                         // a request sequence number to use in that response.
-                        Ok(None) => return Err(UnrealscriptAdapterError::NotConnected),
-                        Err(_) => return Err(UnrealscriptAdapterError::NotConnected),
+                        None => return Err(UnrealscriptAdapterError::NotConnected),
+                        Some(Err(_)) => return Err(UnrealscriptAdapterError::NotConnected),
                     }
                 }
                 evt = self.connection.event_receiver().recv() => {
@@ -909,7 +910,12 @@ mod tests {
 
     use common::{UnrealCommand, UnrealResponse};
     use dap::types::{Source, SourceBreakpoint};
-    use tokio::sync::mpsc::Receiver;
+    use tokio::{
+        io::{Stdin, Stdout},
+        sync::mpsc::Receiver,
+    };
+
+    use crate::async_client::AsyncClientImpl;
 
     use super::*;
 
@@ -919,8 +925,8 @@ mod tests {
         "/home/somebody/src/MyPackage/classes/SomeClass.uc"
     };
 
-    fn make_client() -> AsyncClient<tokio::io::Stdin, tokio::io::Stdout> {
-        AsyncClient::new(tokio::io::stdin(), tokio::io::stdout())
+    fn make_client() -> AsyncClientImpl<tokio::io::Stdin, tokio::io::Stdout> {
+        AsyncClientImpl::new(tokio::io::stdin(), tokio::io::stdout())
     }
 
     struct MockConnection {}
@@ -1008,7 +1014,7 @@ mod tests {
         }
     }
 
-    fn make_test_adapter() -> UnrealscriptAdapter {
+    fn make_test_adapter() -> UnrealscriptAdapter<AsyncClientImpl<Stdin, Stdout>> {
         let adapter = UnrealscriptAdapter::new(
             make_client(),
             ClientConfig::new(),

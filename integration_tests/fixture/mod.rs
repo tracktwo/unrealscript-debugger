@@ -1,5 +1,7 @@
 use adapter::{
-    async_client::AsyncClient, comm::tcp::TcpConnection, ClientConfig, UnrealscriptAdapter,
+    async_client::{AsyncClient, AsyncClientImpl},
+    comm::tcp::TcpConnection,
+    ClientConfig, UnrealscriptAdapter,
 };
 use common::{UnrealCommand, UnrealInterfaceMessage};
 use futures::{stream::SplitStream, SinkExt, StreamExt};
@@ -14,6 +16,7 @@ pub type TcpFrame = tokio_serde::Framed<
     UnrealInterfaceMessage,
     Json<UnrealCommand, UnrealInterfaceMessage>,
 >;
+
 /// Integration test setup:
 /// - construct an adapter and client
 /// - Create a channel to receive events and hook this up to the client
@@ -26,21 +29,14 @@ pub type TcpFrame = tokio_serde::Framed<
 /// Test cases can now send requests and receive responses through the adapter. Events sent from
 /// the closure will appear in the event receiver.
 
-pub async fn setup(//f: F,
-) -> (UnrealscriptAdapter, Debugger, SplitStream<TcpFrame>)
-where
-    // F: FnOnce(
-    //         &mut Debugger,
-    //         &mut TcpFrame
-    //     ) -> ()
-    //     + Send
-    //     + 'static,
-{
+pub async fn setup_with_client<C: AsyncClient + Unpin>(
+    client: C,
+) -> (UnrealscriptAdapter<C>, Debugger, SplitStream<TcpFrame>) {
     let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp.local_addr().unwrap().port();
 
     let adapter = UnrealscriptAdapter::new(
-        AsyncClient::new(tokio::io::stdin(), tokio::io::stdout()),
+        client,
         ClientConfig {
             one_based_lines: true,
             supports_variable_type: true,
@@ -78,4 +74,17 @@ where
     });
 
     (adapter, dbg, tcp_rx)
+}
+
+#[allow(dead_code)]
+pub async fn setup() -> (
+    UnrealscriptAdapter<AsyncClientImpl<tokio::io::Stdin, tokio::io::Stdout>>,
+    Debugger,
+    SplitStream<TcpFrame>,
+) {
+    setup_with_client(AsyncClientImpl::new(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    ))
+    .await
 }

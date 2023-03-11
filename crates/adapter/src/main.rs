@@ -1,7 +1,8 @@
-use adapter::disconnected_adapter::{DisconnectedAdapter, DisconnectedAdapterError};
+use adapter::{
+    async_client::AsyncClientImpl,
+    disconnected_adapter::{DisconnectedAdapter, DisconnectedAdapterError},
+};
 use flexi_logger::{Duplicate, FileSpec, Logger};
-
-use adapter::async_client::AsyncClient;
 
 #[tokio::main]
 async fn main() {
@@ -17,7 +18,7 @@ async fn main() {
         log::error!("Panic: {p:#?}");
     }));
 
-    let client = AsyncClient::new(tokio::io::stdin(), tokio::io::stdout());
+    let client = AsyncClientImpl::new(tokio::io::stdin(), tokio::io::stdout());
     let mut adapter = DisconnectedAdapter::new(client);
 
     log::info!("Ready to start!");

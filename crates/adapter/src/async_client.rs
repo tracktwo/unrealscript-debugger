@@ -2,103 +2,81 @@
 
 use std::io::{Error, ErrorKind};
 
+use bytes::BytesMut;
 use dap::{
     events::EventProtocolMessage,
     prelude::Event,
     requests::Request,
     responses::{Response, ResponseProtocolMessage},
 };
-use futures::executor;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use futures::{executor, stream::Next, Stream, StreamExt};
+use memmem::{Searcher, TwoWaySearcher};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio_util::codec::{Decoder, FramedRead};
 
-pub struct AsyncClient<R, W>
+pub trait AsyncClient {
+    type St: Unpin + Stream<Item = Result<Request, Error>>;
+
+    fn next_request<'a>(&'a mut self) -> Next<'a, Self::St>;
+    fn respond(&mut self, response: Response) -> Result<(), Error>;
+    fn send_event(&mut self, event: Event) -> Result<(), Error>;
+}
+
+pub struct AsyncClientImpl<R, W>
 where
     R: AsyncRead,
     W: AsyncWrite,
 {
-    input: BufReader<R>,
+    pub input: FramedRead<R, AsyncClientDecoder>,
     output: BufWriter<W>,
     seq: i64,
+}
+
+/// A Decoder struct for DAP requests.
+pub struct AsyncClientDecoder {
     state: State,
-    next_msg_size: usize,
-    buf: Vec<u8>,
+    body_start: usize,
+    body_len: usize,
 }
 
 /// A representation of the current client reader state. Each request message
 /// is made up of three parts: A header, a body, and a separator between them.
 enum State {
     Header,
-    Sep,
     Body,
 }
 
-impl<R, W> AsyncClient<R, W>
+impl<R, W> AsyncClientImpl<R, W>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     pub fn new(input: R, output: W) -> Self {
         Self {
-            input: BufReader::new(input),
+            input: FramedRead::new(input, AsyncClientDecoder::new()),
             output: BufWriter::new(output),
             seq: 0,
-            state: State::Header,
-            next_msg_size: 0,
-            buf: Vec::new(),
         }
     }
 
-    /// Read the next request from the stream.
-    ///
-    /// This function must be cancelation safe.
-    pub async fn next(&mut self) -> Result<Option<Request>, Error> {
-        loop {
-            match &self.state {
-                State::Header => match self.input.read_until(b'\n', &mut self.buf).await {
-                    Ok(0) => return Ok(None),
-                    Ok(_) => self.process_header()?,
-                    Err(e) => return Err(e),
-                },
-                State::Sep => match self.input.read_until(b'\n', &mut self.buf).await {
-                    Ok(0) => return Ok(None),
-                    Ok(_) => self.process_separator()?,
-                    Err(e) => return Err(e),
-                },
-                State::Body => {
-                    // Pull some bytes from the reader's buffer, and move them into
-                    // our buffer.
-                    let num_consumed = match self.input.fill_buf().await {
-                        Ok(s) if s.len() == 0 => return Ok(None),
-                        Ok(s) => {
-                            // If the returned buf size is not big enough to complete
-                            // our message then move all bytes into our buf.
-                            if self.buf.len() + s.len() <= self.next_msg_size {
-                                self.buf.extend_from_slice(s);
-                                dbg!(s);
-                                s.len()
-                            } else {
-                                // We've internally buffered more bytes than necessary for
-                                // the next message. Consume only the amount we need.
-                                let bytes_used = self.next_msg_size - self.buf.len();
-                                self.buf.extend_from_slice(&s[..bytes_used]);
-                                dbg!(s);
-                                bytes_used
-                            }
-                            // Otherwise we'll stay in the same state and try to read more.
-                        }
-                        Err(e) => return Err(e),
-                    };
-                    self.input.consume(num_consumed);
-                    // If our buffer now holds a full message it's time to process it.
-                    if self.buf.len() == self.next_msg_size {
-                        return Ok(Some(self.process_message()?));
-                    }
-                }
-            }
-        }
+    fn next_seq(&mut self) -> i64 {
+        self.seq += 1;
+        self.seq
+    }
+}
+
+impl<R, W> AsyncClient for AsyncClientImpl<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    type St = FramedRead<R, AsyncClientDecoder>;
+
+    fn next_request<'a>(&'a mut self) -> Next<'a, Self::St> {
+        self.input.next()
     }
 
-    pub fn respond(&mut self, response: Response) -> Result<(), Error> {
+    fn respond(&mut self, response: Response) -> Result<(), Error> {
         let response_message = ResponseProtocolMessage {
             seq: self.next_seq(),
             response,
@@ -112,7 +90,7 @@ where
         Ok(())
     }
 
-    pub fn send_event(&mut self, event: Event) -> Result<(), Error> {
+    fn send_event(&mut self, event: Event) -> Result<(), Error> {
         let event_message = EventProtocolMessage {
             seq: self.next_seq(),
             event,
@@ -125,21 +103,26 @@ where
         })?;
         Ok(())
     }
+}
 
-    fn next_seq(&mut self) -> i64 {
-        self.seq += 1;
-        self.seq
+impl AsyncClientDecoder {
+    pub fn new() -> Self {
+        Self {
+            state: State::Header,
+            body_start: 0,
+            body_len: 0,
+        }
     }
-
-    /// Parse a DAP header and move self to the next state or return an error.
+    /// Parse a DAP header from the given buffer and record the expected offset of the body
+    /// and its length, then move to the 'body' state.
     ///
-    /// `self.buf` should contain a single line representing a DAP header,
-    /// and the only supported DAP header is 'Content-Length'.
-    fn process_header(&mut self) -> Result<(), Error> {
+    /// 'src' is the input buffer so far
+    fn process_header(&mut self, src: &[u8]) -> Result<(), Error> {
         // The buffer should be a well-formed utf-8 string.
-        let str = std::str::from_utf8(&self.buf)
-            .or_else(|e| Err(Error::new(ErrorKind::InvalidData, e)))?;
+        let str =
+            std::str::from_utf8(&src).or_else(|e| Err(Error::new(ErrorKind::InvalidData, e)))?;
 
+        assert!(str.ends_with("\r\n\r\n"));
         let spl: Vec<&str> = str.trim_end().split(':').collect();
         if spl.len() == 2 {
         } else {
@@ -159,44 +142,60 @@ where
             )),
         }?;
 
-        self.buf.clear();
-        self.state = State::Sep;
-        self.next_msg_size = len;
-        if self.buf.capacity() < len {
-            self.buf.reserve(len - self.buf.capacity());
-        }
+        self.state = State::Body;
+        self.body_start = src.len();
+        self.body_len = len;
         Ok(())
     }
 
-    /// Parse the end of the DAP header and move self to the next state, or error.
-    fn process_separator(&mut self) -> Result<(), Error> {
-        let str = std::str::from_utf8(&self.buf)
-            .or_else(|e| Err(Error::new(ErrorKind::InvalidData, e)))?;
-
-        if str == "\r\n" {
-            self.buf.clear();
-            self.state = State::Body;
-            Ok(())
-        } else {
-            Err(Error::new(
-                ErrorKind::InvalidData,
-                "Expected empty header separator: {str}",
-            ))
-        }
-    }
-
     /// Process a message.
-    fn process_message(&mut self) -> Result<Request, Error> {
-        // We should never move more bytes from the reader's buffer into our own buffer
-        // than we needed for the next message.
-        assert!(self.buf.len() == self.next_msg_size);
-        dbg!(&self.buf);
-        let req = serde_json::from_slice(&self.buf)
+    fn process_message(&mut self, src: &[u8]) -> Result<Request, Error> {
+        // We should have a full message to parse. Note that 'src' still contains
+        // the header bytes as we don't consume them until the entire frame is complete.
+        assert!(src.len() >= self.body_start + self.body_len);
+        let req = serde_json::from_slice(&src[self.body_start..self.body_start + self.body_len])
             .or_else(|e| Err(Error::new(ErrorKind::InvalidData, e)));
-        // Consume the bytes from our buffer and return to the header state.
-        self.buf.clear();
         self.state = State::Header;
+        self.body_start = 0;
+        self.body_len = 0;
         return req;
+    }
+}
+
+impl Decoder for AsyncClientDecoder {
+    type Item = Request;
+    type Error = std::io::Error;
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        loop {
+            match &self.state {
+                State::Header => {
+                    let search = TwoWaySearcher::new(b"\r\n\r\n");
+                    match search.search_in(src) {
+                        Some(pos) => {
+                            self.process_header(&src.as_ref()[..pos + 4])?;
+                            src.reserve(self.body_len);
+                            // Do not return here since we might have enough bytes in
+                            // 'src' to complete the message. We're now in the Body
+                            // state so we'll loop and try to process the body if we
+                            // can.
+                        }
+                        None => return Ok(None),
+                    };
+                }
+                State::Body => {
+                    if src.len() >= self.body_start + self.body_len {
+                        // Remove the packet bytes from the stream: we will never return
+                        // these again.
+                        let packet = src.split_to(self.body_len + self.body_start);
+                        // Process the packet and return the message if successful.
+                        let msg = self.process_message(&packet)?;
+                        return Ok(Some(msg));
+                    } else {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -213,10 +212,10 @@ mod tests {
     async fn read_partial() {
         let input = Cursor::new("Content-Length: ");
         let output: Vec<u8> = vec![];
-        let mut client = AsyncClient::new(input, output);
+        let mut client = AsyncClientImpl::new(input, output);
         // The stream should end before we successfully read the full packet. This is an error.
-        match client.next().await {
-            Err(e) => assert!(e.kind() == ErrorKind::InvalidData),
+        match client.next_request().await {
+            Some(Err(_)) => (),
             _ => panic!("Unexpected result"),
         }
     }
@@ -227,15 +226,15 @@ mod tests {
         let str = format!("Content-Length: {}\r\n\r\n{payload}", payload.len());
         let input = Cursor::new(str);
         let output: Vec<u8> = vec![];
-        let mut client = AsyncClient::new(input, output);
-        match client.next().await {
-            Ok(Some(req)) => assert!(matches!(req.command, Command::Initialize(_))),
+        let mut client = AsyncClientImpl::new(input, output);
+        match client.next_request().await {
+            Some(Ok(req)) => assert!(matches!(req.command, Command::Initialize(_))),
             other => panic!("Expected valid request but got {other:?}"),
         }
 
         // We should now be at the end of the stream.
-        match client.next().await {
-            Ok(None) => (),
+        match client.next_request().await {
+            None => (),
             other => panic!("Expected end of stream but got {other:?}"),
         }
     }
@@ -250,13 +249,10 @@ mod tests {
         );
         let input = Cursor::new(str);
         let output: Vec<u8> = vec![];
-        let mut client = AsyncClient::new(input, output);
-        match client.next().await {
-            Ok(Some(req)) => assert!(matches!(req.command, Command::Initialize(_))),
+        let mut client = AsyncClientImpl::new(input, output);
+        match client.next_request().await {
+            Some(Ok(req)) => assert!(matches!(req.command, Command::Initialize(_))),
             other => panic!("Expected valid request but got {other:?}"),
         }
-
-        // The client's buffer should be empty, even if the input's buffer isn't.
-        assert!(client.buf.is_empty());
     }
 }
