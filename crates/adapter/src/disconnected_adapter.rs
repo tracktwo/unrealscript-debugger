@@ -81,6 +81,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         loop {
             select! {
                 request = self.client.next_request() => {
+                    log::trace!("Received request: {request:?}");
                     match request {
                         Some(Ok(request)) => {
                             match &request.command {

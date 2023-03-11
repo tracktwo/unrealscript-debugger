@@ -63,6 +63,23 @@ where
         self.seq += 1;
         self.seq
     }
+
+    fn send_message(&mut self, msg: &[u8]) -> Result<(), Error> {
+        let len = msg.len();
+        let header = format!("Content-Length: {len}\r\n\r\n");
+        log::trace!(
+            "Sending: {header}{}",
+            std::str::from_utf8(msg).expect("Message must be valid utf8")
+        );
+        executor::block_on(async move {
+            self.output.write_all(header.as_bytes()).await?;
+            self.output.write_all(msg).await?;
+            self.output.flush().await?;
+            log::trace!("Finished writing response");
+            Ok::<(), Error>(())
+        })?;
+        Ok(())
+    }
 }
 
 impl<R, W> AsyncClient for AsyncClientImpl<R, W>
@@ -81,13 +98,9 @@ where
             seq: self.next_seq(),
             response,
         };
-        let mut payload = serde_json::ser::to_vec(&response_message)
+        let payload = serde_json::ser::to_vec(&response_message)
             .expect("Response messages are serializable to json");
-        executor::block_on(async move {
-            self.output.write_all(&mut payload).await?;
-            Ok::<(), Error>(())
-        })?;
-        Ok(())
+        self.send_message(&payload)
     }
 
     fn send_event(&mut self, event: Event) -> Result<(), Error> {
@@ -95,13 +108,9 @@ where
             seq: self.next_seq(),
             event,
         };
-        let mut payload = serde_json::ser::to_vec(&event_message)
+        let payload = serde_json::ser::to_vec(&event_message)
             .expect("Event messages are serializable to json");
-        executor::block_on(async move {
-            self.output.write_all(&mut payload).await?;
-            Ok::<(), Error>(())
-        })?;
-        Ok(())
+        self.send_message(&payload)
     }
 }
 

@@ -95,6 +95,7 @@ pub fn initialize(cb: UnrealCallback) -> () {
         // to complete.
         thread::spawn(move || {
             let rt = Builder::new_current_thread()
+                .enable_io()
                 .build()
                 .expect("Failed to create runtime");
             rt.block_on(async {
