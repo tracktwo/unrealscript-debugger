@@ -26,7 +26,7 @@ use crate::{
 /// A representation of a disconnected adapter. This manages the portion of the
 /// protocol up to the point where a connection to the debuggee is established.
 pub struct DisconnectedAdapter {
-    client: AsyncClient,
+    client: AsyncClient<tokio::io::Stdin, tokio::io::Stdout>,
     config: ClientConfig,
 }
 
@@ -62,7 +62,7 @@ impl From<std::io::Error> for DisconnectedAdapterError {
 
 impl DisconnectedAdapter {
     /// Create a new disconnected adapter for the given client.
-    pub fn new(client: AsyncClient) -> Self {
+    pub fn new(client: AsyncClient<tokio::io::Stdin, tokio::io::Stdout>) -> Self {
         DisconnectedAdapter {
             client,
             config: ClientConfig {

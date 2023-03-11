@@ -70,7 +70,7 @@ impl ClientConfig {
 
 /// A connected Unrealscript debug adapter.
 pub struct UnrealscriptAdapter {
-    client: AsyncClient,
+    client: AsyncClient<tokio::io::Stdin, tokio::io::Stdout>,
     config: ClientConfig,
     connection: Box<dyn Connection>,
     class_map: BTreeMap<String, ClassInfo>,
@@ -151,7 +151,7 @@ type Error = UnrealscriptAdapterError;
 
 impl UnrealscriptAdapter {
     pub fn new(
-        client: AsyncClient,
+        client: AsyncClient<tokio::io::Stdin, tokio::io::Stdout>,
         config: ClientConfig,
         connection: Box<dyn Connection>,
         child: Option<Child>,
@@ -178,7 +178,7 @@ impl UnrealscriptAdapter {
             .expect("Receiver cannot drop.");
     }
 
-    pub fn client(&self) -> &AsyncClient {
+    pub fn client(&self) -> &AsyncClient<tokio::io::Stdin, tokio::io::Stdout> {
         &self.client
     }
 
@@ -919,7 +919,7 @@ mod tests {
         "/home/somebody/src/MyPackage/classes/SomeClass.uc"
     };
 
-    fn make_client() -> AsyncClient {
+    fn make_client() -> AsyncClient<tokio::io::Stdin, tokio::io::Stdout> {
         AsyncClient::new(tokio::io::stdin(), tokio::io::stdout())
     }
 
