@@ -22,15 +22,18 @@ async fn main() {
     let mut adapter = DisconnectedAdapter::new(client);
 
     log::info!("Ready to start!");
-    loop {
+    let return_code = loop {
         match adapter.connect().await {
             Ok(mut connected) => {
                 log::info!("Connection established!");
                 match connected.process_messages().await {
-                    Ok(()) => std::process::exit(0),
+                    Ok(()) => {
+                        log::info!("Debugger session ended.");
+                        break 0;
+                    }
                     Err(e) => {
                         log::error!("Adapter exiting with error {e}");
-                        std::process::exit(1);
+                        break 1;
                     }
                 };
             }
@@ -42,8 +45,10 @@ async fn main() {
             }
             Err(DisconnectedAdapterError::IoError(e)) => {
                 log::error!("Received fatal error {e} while connecting. Aborting");
-                std::process::exit(1);
+                break 1;
             }
         }
-    }
+    };
+
+    std::process::exit(return_code);
 }

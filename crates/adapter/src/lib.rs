@@ -150,6 +150,21 @@ impl From<std::io::Error> for UnrealscriptAdapterError {
 
 type Error = UnrealscriptAdapterError;
 
+impl<C: AsyncClient + Unpin> Drop for UnrealscriptAdapter<C> {
+    fn drop(&mut self) {
+        match self.child.take() {
+            Some(mut child) => {
+                log::trace!("Killing child process.");
+                child.kill().unwrap_or_else(|e| {
+                    log::error!("Failed to kill child process: {e:?}");
+                    ()
+                })
+            }
+            None => (),
+        }
+    }
+}
+
 impl<C> UnrealscriptAdapter<C>
 where
     C: AsyncClient + Unpin,
