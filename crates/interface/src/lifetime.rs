@@ -52,7 +52,10 @@ use tokio::{
     net::{TcpListener, TcpStream},
     runtime::Builder,
     select,
-    sync::mpsc,
+    sync::{
+        broadcast::{self, Receiver},
+        mpsc,
+    },
 };
 use tokio_serde::formats::SymmetricalJson;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -86,20 +89,24 @@ pub fn initialize(cb: UnrealCallback) -> () {
             log::error!("Panic: {p:#?}");
         }));
 
-        // Construct the debugger state.
-        dbg.replace(Debugger::new());
+        // Create a channel pair for shutting down the interface. This is used when
+        // we receive a signal that Unreal is about to kill the debugging session. The
+        // debugger instance owns the tx side and can send the event when this happens.
+        // The separate thread we spawn below owns the receiving side and uses this to
+        // cleanly stop itself.
+        let (ctx, crx) = broadcast::channel(10);
 
         // Start the main loop that will listen for connections so we can
         // communiate the debugger state to the adapter. This will spin up a
         // new async runtime for this thread only and wait for the main loop
         // to complete.
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let rt = Builder::new_current_thread()
                 .enable_io()
                 .build()
                 .expect("Failed to create runtime");
             rt.block_on(async {
-                match main_loop(cb).await {
+                match main_loop(cb, crx).await {
                     Ok(()) => (),
                     Err(e) => {
                         // Something catastrophic failed in the main loop. Log it
@@ -109,6 +116,9 @@ pub fn initialize(cb: UnrealCallback) -> () {
                 }
             });
         });
+
+        // Construct the debugger state.
+        dbg.replace(Debugger::new(ctx, Some(handle)));
     }
 }
 
@@ -139,7 +149,7 @@ enum ConnectionResult {
 
 /// The main worker thread for the debugger interface. This is created when the
 /// debugger session is created, and returns when the debugger session ends.
-async fn main_loop(cb: UnrealCallback) -> Result<(), tokio::io::Error> {
+async fn main_loop(cb: UnrealCallback, mut crx: Receiver<()>) -> Result<(), tokio::io::Error> {
     // Start listening on a socket for connections from the adapter.
     let addr: SocketAddr = format!("127.0.0.1:{DEFAULT_PORT}")
         .parse()
@@ -147,13 +157,21 @@ async fn main_loop(cb: UnrealCallback) -> Result<(), tokio::io::Error> {
 
     let server = TcpListener::bind(addr).await?;
     loop {
-        let (mut socket, addr) = server.accept().await?;
-        log::info!("Received connection from {addr}");
-        match handle_connection(&mut socket, cb).await? {
-            // Client disconnected: keep looping and accept another connection
-            ConnectionResult::Disconnected => (),
-            // We're shutting down: close down this loop.
-            ConnectionResult::Shutdown => break,
+        select! {
+            conn = server.accept() => {
+                let (mut socket, addr) = conn?;
+                log::info!("Received connection from {addr}");
+                match handle_connection(&mut socket, cb, &mut crx).await? {
+                    // Client disconnected: keep looping and accept another connection
+                    ConnectionResult::Disconnected => (),
+                    // We're shutting down: close down this loop.
+                    ConnectionResult::Shutdown => break,
+                }
+            }
+            _ = crx.recv() => {
+                log::info!("Received shutdown message. Closing main loop.");
+                break;
+            }
         }
     }
     Ok(())
@@ -167,6 +185,7 @@ async fn main_loop(cb: UnrealCallback) -> Result<(), tokio::io::Error> {
 async fn handle_connection(
     stream: &mut TcpStream,
     cb: UnrealCallback,
+    crx: &mut Receiver<()>,
 ) -> Result<ConnectionResult, tokio::io::Error> {
     // Create a new message passing channel and send the sender to the debugger.
     let (etx, mut erx) = mpsc::channel(128);
@@ -212,6 +231,10 @@ async fn handle_connection(
                     Some(evt) => serializer.send(evt).await.unwrap(),
                     None => break,
                 };
+            },
+            _ = crx.recv() => {
+                log::info!("Received shutdown message. Closing connection.");
+                return Ok(ConnectionResult::Shutdown);
             }
         }
     }

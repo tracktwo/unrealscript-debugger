@@ -1,8 +1,10 @@
 use futures::executor;
 use std::ffi::{c_char, CStr};
 use std::ptr;
+use std::thread::JoinHandle;
 use textcode::iso8859_1;
 use thiserror::Error;
+use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
 use common::{
@@ -17,6 +19,8 @@ const MAGIC_DISCONNECT_STRING: &str = "Log: Detaching UnrealScript Debugger (cur
 
 /// A struct representing the debugger state.
 pub struct Debugger {
+    shutdown_sender: Sender<()>,
+    handle: Option<JoinHandle<()>>,
     class_hierarchy: Vec<String>,
     local_watches: Vec<Watch>,
     global_watches: Vec<Watch>,
@@ -128,8 +132,10 @@ impl Debugger {
     /// cannot safely call through the callback as callback calls can immediately re-enter the
     /// interface on the same thread, which would require us to re-acquire the debugger mutex while
     /// we already hold it to perform the callback.
-    pub fn new() -> Debugger {
+    pub fn new(ctx: Sender<()>, handle: Option<JoinHandle<()>>) -> Debugger {
         Debugger {
+            shutdown_sender: ctx,
+            handle,
             class_hierarchy: Vec::new(),
             local_watches: vec![Watch {
                 parent: 0,
@@ -322,7 +328,8 @@ impl Debugger {
             UnrealCommand::Disconnect => {
                 log::trace!("Disconnect");
                 self.disconnect();
-                Ok(CommandAction::StopDebugging)
+                let str = "stopdebugging";
+                Ok(CommandAction::Callback(self.encode_string(&str)))
             }
         }
     }
@@ -331,10 +338,12 @@ impl Debugger {
     /// state for the debugging session -- no more messages can be sent or received
     /// until a new session is established.
     fn disconnect(&mut self) -> () {
-        // Drop our references to the communications channels. The main loop thread is still
-        // running but should receive a disconnect from the TCP socket soon and this will
-        // cause us to go back and wait for another connection.
+        // Drop our references to the communications channels.
         self.response_channel.take();
+
+        // Tell the thread to stop itself. This is typically called from this same thread,
+        // so it won't be processed until we return back to the main loop.
+        _ = self.shutdown_sender.send(());
     }
 
     /// Collect watch info and send a variable response with the variable data. This can be invoked
@@ -683,22 +692,59 @@ impl Debugger {
     }
 
     /// A line has been added to the log. Send directly to the adapter (if connected).
+    ///
+    /// This is far more complex of a function than it should be just for logging, because
+    /// this is also the only function we can use to detect when Unreal is closing the
+    /// debugger interface. When the user closes the debugger session with 'toggledebugger'
+    /// the only indication we get that this is happening is a log message with a particular
+    /// format (see MAGIC_DISCONNECT_STRING). When we receive this this is the last callback
+    /// we'll get before Unreal unloads our DLL, so we really need to stop the thread we
+    /// spawned before this happens or the game will crash.
     pub fn add_line_to_log(&mut self, text: *const c_char) -> () {
         let mut str = self.decode_string(text);
 
-        // Unreal does not have a dedicated signal to tell us when things are
-        // shutting down. Instead we just get a log line of a particular format
-        // when the user uses \toggledebugging to disable debugging. When this
-        // happens we are about to be shut down.
-        if str == MAGIC_DISCONNECT_STRING {
-            log::info!("Received shutdown message.");
-
-            // TODO Handle shutdown
-            return;
-        }
-
         if let Some(sender) = &mut self.response_channel {
             log::trace!("Add to log: {str}");
+
+            // Detect if this is a shutdown signal.
+            if str == MAGIC_DISCONNECT_STRING {
+                log::info!("Received shutdown message.");
+
+                // Note that we don't bother sending an event to the adapter to tell it that
+                // we're closing, we just let it sense this by detecting that the TCP connection
+                // has closed. Sending the event would be difficult to guarantee because we'd
+                // need to block here with some complex protocol to be 100% sure the adapter has
+                // received the message before we continue with the shutdown process.
+
+                // Send the shutdown broadcast message to cause our thread to exit. This shouldn't
+                // fail since the spawned thread owns the receiving end, but if it does we
+                // are about to be killed by Unreal anyway. When this thread exits it'll drop
+                // the TCP connection and any other resources our interface holds. The only
+                // object still left behind will be the static objects: this debugger object and
+                // our variable condvar. These are OK (presumably their destructors will run on
+                // the thread that does the DLL unload, triggered from DllMain).
+                _ = self.shutdown_sender.send(());
+
+                // Wait for the thread to exit before we return. If we get here then shutdown was
+                // initiated by a 'toggledebugger' command (if we had initiated shutdown from the
+                // adapter via a Disconnect message we'd have closed the response_channel before
+                // sending the 'stopdebugging' command and would not enter this block).
+                //
+                // When shutdown is initiated from toggledebugger we are running on the
+                // Unreal thread and not the spawned thread, so we are not blocking ourselves
+                // from exiting.
+                if let Some(h) = self.handle.take() {
+                    match h.join() {
+                        Ok(()) => (),
+                        Err(e) => {
+                            log::error!("Error joining thread: {e:?}");
+                        }
+                    }
+                }
+
+                // Now we can return control to Unreal and it will begin the DLL unload process.
+                return;
+            }
 
             // Unreal does not add newlines to log messages, add one for readability.
             str.push_str("\r\n");
@@ -710,7 +756,26 @@ impl Debugger {
                 log::error!("Sending log failed: {e}");
             }
         } else {
-            log::trace!("Skipping log entry: not connected.");
+            // We received a log line but we aren't in a connected state. This can happen
+            // because we haven't attached yet, or it can also happen as part of an adapter
+            // initiated shutdown process. In the latter case we initiated the shutdown
+            // from the interface thread, not Unreal's thread, by issuing the "stopdebugging"
+            // command, and we received this callback on that same thread. So we can't block
+            // here waiting for the thread to exit like we could for the 'toggledebugger' case
+            // above, since the thread can't exit until we return. Even worse, the shutdown
+            // process is already initiated on another thread before we even get this call,
+            // so there is a race condition here. In practice it seems like we can safely
+            // shut ourselves down here before Unreal gets too far along the unloading process,
+            // but this is not guaranteed.
+            //
+            // A more complex fix might be to hook DLL_PROCESS_DETACH in a DllMain, which gets
+            // called from the main thread. We could block there until the thread exits (or
+            // at least until it gets very close to exiting) but even that is not really guaranteed
+            // since if we're already in DllMain then the main thread holds the loader lock and
+            // the thread can't call DllMain to THREAD_DETACH. Blocking inside DllMain is also
+            // very scary, and the documentation specifically warns against trying to do any
+            // thread synchronization there but it could possible be done "sort of" safely by
+            // using atomics.
         }
     }
 
@@ -822,12 +887,15 @@ fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::broadcast::channel;
+
     use super::*;
 
     #[test]
     fn adding_to_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy[0], "Package.Class");
     }
@@ -835,7 +903,8 @@ mod tests {
     #[test]
     fn clearing_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy.len(), 1);
         dbg.clear_class_hierarchy();
@@ -846,7 +915,8 @@ mod tests {
     fn add_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 1);
         assert_eq!(dbg.local_watches.len(), 2);
         assert_eq!(dbg.global_watches.len(), 1);
@@ -865,7 +935,8 @@ mod tests {
     fn clear_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(WatchKind::Local, -1, name, val);
         dbg.add_watch(WatchKind::Global, -1, name, val);
         dbg.add_watch(WatchKind::User, -1, name, val);
@@ -880,13 +951,15 @@ mod tests {
     fn add_watch_invalid_parent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(WatchKind::Local, 1, name, val);
     }
 
     #[test]
     fn log_sends_line() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         let (tx, mut rx) = mpsc::channel(1);
         dbg.response_channel = Some(tx);
         let str = "This is a log line\0";
@@ -904,7 +977,8 @@ mod tests {
 
     #[test]
     fn add_frame() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.add_frame("Function MyPackage.Class:MyFunction\0".as_ptr() as *const i8);
         assert_eq!(dbg.callstack[0].qualified_name, "MyPackage.Class");
         assert_eq!(dbg.callstack[0].function_name, "MyFunction");
@@ -912,7 +986,8 @@ mod tests {
 
     #[test]
     fn empty_stacktrace() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         let response = dbg.handle_stacktrace_request(&StackTraceRequest {
             start_frame: 0,
             levels: 20,
@@ -922,7 +997,8 @@ mod tests {
 
     #[test]
     fn with_stacktrace() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
@@ -956,7 +1032,8 @@ mod tests {
 
     #[test]
     fn partial_stacktrace_start() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
@@ -983,7 +1060,8 @@ mod tests {
 
     #[test]
     fn partial_stacktrace_end() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
@@ -1010,7 +1088,8 @@ mod tests {
 
     #[test]
     fn partial_stacktrace_beyond() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
             function_name: "foo".to_string(),
@@ -1030,7 +1109,8 @@ mod tests {
 
     #[test]
     fn empty_watch_count() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         assert_eq!(dbg.watch_count(WatchKind::Local, 0), 0);
         assert_eq!(dbg.watch_count(WatchKind::Global, 0), 0);
         assert_eq!(dbg.watch_count(WatchKind::User, 0), 0);
@@ -1038,7 +1118,8 @@ mod tests {
 
     #[test]
     fn local_watch_count() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(
             WatchKind::Local,
             -1,
@@ -1059,7 +1140,8 @@ mod tests {
 
     #[test]
     fn global_watch_count() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(
             WatchKind::Global,
             -1,
@@ -1079,7 +1161,8 @@ mod tests {
 
     #[test]
     fn watch_counts_roots_only() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(
             WatchKind::Global,
             -1,
@@ -1115,7 +1198,8 @@ mod tests {
 
     #[test]
     fn simple_name() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         let str = "Location ( Struct,00007FF45D513A00,00007FF44F9B52F0 )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "Location");
@@ -1125,7 +1209,8 @@ mod tests {
 
     #[test]
     fn static_array_name() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         let str = "CharacterStats ( Static Struct Array )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "CharacterStats");
@@ -1135,7 +1220,8 @@ mod tests {
 
     #[test]
     fn dynamic_array_name() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         let str = "AWCAbilities ( Array )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "AWCAbilities");
@@ -1145,7 +1231,8 @@ mod tests {
 
     #[test]
     fn base_class_name() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         let str = "[[ Object ]]\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "[[ Object ]]");
@@ -1155,7 +1242,8 @@ mod tests {
 
     #[test]
     fn array_element_name() {
-        let mut dbg = Debugger::new();
+        let (ctx, _) = channel(1);
+        let mut dbg = Debugger::new(ctx, None);
         let str = "SomeArray[0]\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "SomeArray[0]");

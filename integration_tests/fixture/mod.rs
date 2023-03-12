@@ -6,7 +6,10 @@ use adapter::{
 use common::{UnrealCommand, UnrealInterfaceMessage};
 use futures::{stream::SplitStream, SinkExt, StreamExt};
 use interface::debugger::Debugger;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::broadcast::channel,
+};
 use tokio_serde::formats::Json;
 use tokio_util::codec::LengthDelimitedCodec;
 
@@ -48,8 +51,8 @@ pub async fn setup_with_client<C: AsyncClient + Unpin>(
     );
 
     log::trace!("Created adapter");
-
-    let mut dbg = Debugger::new();
+    let (ctx, _crx) = channel(1);
+    let mut dbg = Debugger::new(ctx, None);
     let (stream, _addr) = tcp.accept().await.unwrap();
     log::trace!("Got connection");
 

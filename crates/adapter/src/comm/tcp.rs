@@ -127,9 +127,10 @@ async fn debuggee_tcp_loop(
                 match event {
                     Some(Ok(UnrealInterfaceMessage::Event(event))) => {
                         // We've received an event from the interface. Send it along to the
-                        // adapter. The receiving side must still be alive since it's tied to
-                        // the lifetime of the connection object which would have aborted this
-                        // task if it was dropping.
+                        // adapter's main processing loop where it will decode the event and
+                        // decide what to do with it. The receiving side must still be alive
+                        // since it's tied to the lifetime of the connection object which
+                        // would have aborted this task if it was dropping.
                         event_sender.send(event).await.expect("Event receiver must still be alive");
                     },
                     Some(Ok(UnrealInterfaceMessage::Response(resp))) => {
