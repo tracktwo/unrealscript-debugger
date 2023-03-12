@@ -1,7 +1,8 @@
 use adapter::{
     async_client::{AsyncClient, AsyncClientImpl},
+    client_config::ClientConfig,
     comm::tcp::TcpConnection,
-    ClientConfig, UnrealscriptAdapter,
+    connected_adapter::UnrealscriptAdapter,
 };
 use common::{UnrealCommand, UnrealInterfaceMessage};
 use futures::{stream::SplitStream, SinkExt, StreamExt};

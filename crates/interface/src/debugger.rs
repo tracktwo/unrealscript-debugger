@@ -1,3 +1,8 @@
+//! Debugger state and interface layer
+//!
+//! This module contains the definition of the global debugger state object used
+//! by Unreal and all the associated handler functions for managing calls from the
+//! Unreal API and calls from the connected adapter.
 use futures::executor;
 use std::ffi::{c_char, CStr};
 use std::thread::JoinHandle;
@@ -12,7 +17,7 @@ use common::{
 };
 use common::{Frame, WatchKind};
 
-use crate::lifetime::VARIABLE_REQUST_CONDVAR;
+use crate::VARIABLE_REQUST_CONDVAR;
 
 const MAGIC_DISCONNECT_STRING: &str = "Log: Detaching UnrealScript Debugger (currently detached)";
 
@@ -58,9 +63,7 @@ struct PendingVariableRequest {
 }
 
 /// A variable watch.
-#[derive(Debug)]
-pub struct Watch {
-    pub parent: usize,
+struct Watch {
     pub name: String,
     pub ty: String,
     pub value: String,
@@ -87,6 +90,7 @@ impl Watch {
 /// commands.
 #[derive(Error, Debug)]
 pub enum DebuggerError {
+    /// There is no active connection to the adapter.
     #[error("Not connected")]
     NotConnected,
 }
@@ -103,7 +107,7 @@ pub enum DebuggerError {
 /// is used to pass information back to the event loop outside the debugger mutex
 /// that it can then dispatch to Unreal.
 ///
-/// ### Examples
+/// # Examples
 ///
 /// The 'StackTrace' command does not require communication with unreal, we already
 /// have the full stack information in the debugger object to prepare the response,
@@ -115,14 +119,12 @@ pub enum DebuggerError {
 /// interface API. This is represented by the 'Callback' variant where the string
 /// to pass to the callback (e.g. 'addbreakpoint <file> <line>') is part of the
 /// variant.
-///
-/// The 'StopDebugging' command tells Unreal to stop debugging. This requires a
-/// callback but is distinct from the 'Callback' variant because we also need to
-/// cleanly shut down the event processing loop before sending the command to unreal.
 pub enum CommandAction {
+    /// No action is necessary, the command is self-contained. e.g. StackTrace.
     Nothing,
+    /// Send the given command string to the Unreal callback. Must be a null terminated
+    /// ascii string.
     Callback(Vec<u8>),
-    StopDebugging,
 }
 
 impl Debugger {
@@ -137,7 +139,6 @@ impl Debugger {
             handle,
             class_hierarchy: Vec::new(),
             local_watches: vec![Watch {
-                parent: 0,
                 name: "ROOT".to_string(),
                 ty: "***".to_string(),
                 value: "***".to_string(),
@@ -145,7 +146,6 @@ impl Debugger {
                 is_array: false,
             }],
             global_watches: vec![Watch {
-                parent: 0,
                 name: "ROOT".to_string(),
                 ty: "***".to_string(),
                 value: "***".to_string(),
@@ -153,7 +153,6 @@ impl Debugger {
                 is_array: false,
             }],
             user_watches: vec![Watch {
-                parent: 0,
                 name: "ROOT".to_string(),
                 ty: "***".to_string(),
                 value: "***".to_string(),
@@ -481,6 +480,7 @@ impl Debugger {
         self.class_hierarchy.clear();
     }
 
+    /// Clear the given watch list.
     pub fn clear_watch(&mut self, kind: WatchKind) {
         let list = self.get_watches(kind);
         list.clear();
@@ -488,7 +488,6 @@ impl Debugger {
         // Add the root node to the list. This will let us track all children
         // of the root for easy access.
         list.push(Watch {
-            parent: 0,
             name: "ROOT".to_string(),
             ty: "***".to_string(),
             value: "***".to_string(),
@@ -497,6 +496,8 @@ impl Debugger {
         });
     }
 
+    /// Add a watch entry with the given name and value. Returns a unique id (for
+    /// the duration the debugger is stopped) for this watch.
     pub fn add_watch(
         &mut self,
         kind: WatchKind,
@@ -511,7 +512,6 @@ impl Debugger {
         let (name, ty, is_array) = self.decompose_name(name);
 
         let watch = Watch {
-            parent,
             name,
             ty: ty.unwrap_or("<unknown type>".to_string()),
             value: self.decode_string(value),
@@ -539,6 +539,9 @@ impl Debugger {
         new_entry.try_into().unwrap()
     }
 
+    /// Lock the given watchlist.
+    ///
+    /// This is unused in this implementation.
     pub fn lock_watchlist(&mut self) {}
 
     /// Unreal has unlocked a watchlist. We don't perform any locking of the watchlist but this
@@ -676,6 +679,7 @@ impl Debugger {
         }
     }
 
+    /// Return the number of children for a given variable.
     pub fn watch_count(&mut self, kind: WatchKind, parent: usize) -> usize {
         self.get_watches(kind)[parent].children.len()
     }
@@ -790,6 +794,11 @@ impl Debugger {
         }
     }
 
+    /// Returns true if we have a pending variable request.
+    ///
+    /// Pending variable requests are registered when we are asked to provide
+    /// the value of something from outside the current stack frame, such as
+    /// a 'scopes' request for another stack frame or a newly-added user watch.
     pub fn pending_variable_request(&self) -> bool {
         self.pending_variable_request.is_some()
     }
@@ -866,9 +875,6 @@ impl Debugger {
         }
     }
 }
-
-#[derive(Debug)]
-pub struct UnknownCommandError;
 
 /// Convert an unreal C string pointer to a CStr.
 fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {

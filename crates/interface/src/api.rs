@@ -16,7 +16,7 @@ use crate::lifetime::initialize;
 use common::WatchKind;
 use log;
 
-use crate::lifetime::DEBUGGER;
+use crate::DEBUGGER;
 
 /// Called once from Unreal when the debugger interface is initialized, passing the callback
 /// function to use.
@@ -140,6 +140,9 @@ pub extern "C" fn UnlockList(kind: i32) {
     );
 }
 
+/// Adds a breakpoint.
+///
+/// Called in response to an 'addbreakpoint' command.
 #[no_mangle]
 pub extern "C" fn AddBreakpoint(class_name: *const c_char, line: i32) {
     let mut hnd = DEBUGGER.lock().unwrap();
@@ -147,6 +150,9 @@ pub extern "C" fn AddBreakpoint(class_name: *const c_char, line: i32) {
     dbg.add_breakpoint(class_name, line);
 }
 
+/// Remove a breakpoint.
+///
+/// Called in response to a 'removebreakpoint' command.
 #[no_mangle]
 pub extern "C" fn RemoveBreakpoint(class_name: *const c_char, line: i32) {
     let mut hnd = DEBUGGER.lock().unwrap();
@@ -154,15 +160,17 @@ pub extern "C" fn RemoveBreakpoint(class_name: *const c_char, line: i32) {
     dbg.remove_breakpoint(class_name, line);
 }
 
+/// Focus the given class name in the editor.
+///
+/// For our purposes this API is not necessary. This gets send on a break
+/// and any changestack command to indicate what source file to show, but
+/// the full filenames of each stack frame are also sent in the CallStackAdd
+/// command, and we use that information instead. When switching frames
+/// we already know the filename for the frame we switched to.
 #[no_mangle]
-pub extern "C" fn EditorLoadClass(_class_name: *const c_char) {
-    // For our purposes this API is not necessary. This gets send on a break
-    // and any changestack command to indicate what source file to show. But
-    // the full filenames of each stack frame are also sent in the CallStackAdd
-    // command, and we use this information instead. When switching frames
-    // we already know the filename for the frame we switched to.
-}
+pub extern "C" fn EditorLoadClass(_class_name: *const c_char) {}
 
+/// Jump to the given line in the editor.
 #[no_mangle]
 pub extern "C" fn EditorGotoLine(line: i32, _highlight: i32) {
     let mut hnd = DEBUGGER.lock().unwrap();
@@ -170,6 +178,7 @@ pub extern "C" fn EditorGotoLine(line: i32, _highlight: i32) {
     dbg.goto_line(line);
 }
 
+/// A line has been added to the log.
 #[no_mangle]
 pub extern "C" fn AddLineToLog(text: *const c_char) {
     let mut hnd = DEBUGGER.lock().unwrap();
@@ -177,6 +186,10 @@ pub extern "C" fn AddLineToLog(text: *const c_char) {
     dbg.add_line_to_log(text);
 }
 
+/// Clear the call stack.
+///
+/// This is called after Unreal breaks, and is followed by one or more calls
+/// to 'CallstackAdd'.
 #[no_mangle]
 pub extern "C" fn CallStackClear() {
     log::trace!("CallStackClear");
@@ -185,7 +198,8 @@ pub extern "C" fn CallStackClear() {
     dbg.clear_callstack();
 }
 
-/// Add the given class name to the call stack. Call stacks are built bottom-up.
+/// Add the given class name to the call stack. Call stacks are built bottom-up
+/// from the deepest call in the stack to the top-most call.
 #[no_mangle]
 pub extern "C" fn CallStackAdd(class_name: *const c_char) {
     log::trace!("CallStackAdd");
@@ -194,6 +208,7 @@ pub extern "C" fn CallStackAdd(class_name: *const c_char) {
     dbg.add_frame(class_name);
 }
 
+/// Record the object name for the current object (this).
 #[no_mangle]
 pub extern "C" fn SetCurrentObjectName(obj_name: *const c_char) {
     log::trace!("SetCurrentObjectName");
@@ -202,6 +217,7 @@ pub extern "C" fn SetCurrentObjectName(obj_name: *const c_char) {
     dbg.current_object_name(obj_name);
 }
 
+/// Unused.
 #[no_mangle]
 pub extern "C" fn DebugWindowState(code: i32) {
     log::trace!("DebugWindowState {code}");

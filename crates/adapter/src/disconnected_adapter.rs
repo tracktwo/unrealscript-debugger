@@ -19,8 +19,10 @@ use serde_json::Value;
 use tokio::select;
 
 use crate::{
-    async_client::AsyncClient, comm::tcp::TcpConnection, ClientConfig, UnrealscriptAdapter,
-    UnrealscriptAdapterError,
+    async_client::AsyncClient,
+    client_config::ClientConfig,
+    comm::tcp::TcpConnection,
+    connected_adapter::{UnrealscriptAdapter, UnrealscriptAdapterError},
 };
 
 /// A representation of a disconnected adapter. This manages the portion of the

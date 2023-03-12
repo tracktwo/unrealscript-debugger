@@ -36,14 +36,10 @@
 //! The 'initialize' function is used to set up the debugger state when we are
 //! starting a debugging session.
 
-use std::{
-    net::SocketAddr,
-    sync::{Condvar, Mutex},
-    thread,
-};
+use std::{net::SocketAddr, thread};
 
 use common::{UnrealCommand, UnrealInterfaceMessage, DEFAULT_PORT};
-use flexi_logger::{FileSpec, FlexiLoggerError, Logger, LoggerHandle};
+use flexi_logger::{FileSpec, FlexiLoggerError, Logger};
 use futures::prelude::*;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -60,14 +56,8 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use crate::{
     api::UnrealCallback,
     debugger::{CommandAction, Debugger, DebuggerError},
+    DEBUGGER, LOGGER, VARIABLE_REQUST_CONDVAR,
 };
-
-/// The debugger state. Calls from Unreal are dispatched into this instance.
-pub static DEBUGGER: Mutex<Option<Debugger>> = Mutex::new(None);
-
-static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
-
-pub static VARIABLE_REQUST_CONDVAR: Condvar = Condvar::new();
 
 /// Initialize the debugger instance. This should be called exactly once when
 /// Unreal first initializes us. Responsible for building the shared state object
@@ -213,7 +203,6 @@ async fn handle_connection(
                         match dispatch_command(command) {
                             CommandAction::Nothing => (),
                             CommandAction::Callback(vec) => (cb)(vec.as_ptr()),
-                            CommandAction::StopDebugging => return Ok(ConnectionResult::Shutdown),
                         }
                     },
                     None => break,
