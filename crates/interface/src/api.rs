@@ -1,6 +1,6 @@
 //! Module for API entry points from Unreal to the debugger interface.
 //!
-//! See: https://docs.unrealengine.com/udk/Three/DebuggerInterface.html
+//! See: <https://docs.unrealengine.com/udk/Three/DebuggerInterface.html>
 //!
 //! This contains all the publicly exported functions defined by the Unrealscript
 //! debugger interface.

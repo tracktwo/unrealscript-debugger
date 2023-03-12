@@ -3,23 +3,29 @@
 //! This module defines the data format between the two. There are three types
 //! of message that can be sent between the components:
 //!
-//! Commands are sent from the adapter to the interface, and instruct the deubgger
+//! - Commands are sent from the adapter to the interface, and instruct the deubgger
 //! to do something (e.g. set a breakpoint, or step over the next line).
 //!
-//! Responses are sent from the interface to the adapter, always in predictable
+//! - Responses are sent from the interface to the adapter, always in predictable
 //! ways: A specific command will result in zero or more responses, and the response
 //! set for a specific command has a fixed structure (e.g. a set breakpoint command
 //! results in exactly one set breakpoint response).
 //!
-//! Events are unpredictable, asynchronous events that are not tied to a particular
+//! - Events are unpredictable, asynchronous events that are not tied to a particular
 //! command (e.g. a log line being added or a break event).
+
+#![warn(missing_docs)]
 
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 
+/// The default port to use for the TCP connection between the interface and
+/// adapter.
 pub const DEFAULT_PORT: u16 = 18777u16;
 
+/// An error indicating a particular value (such as a frame or variable index)
+/// is out of range.
 #[derive(Debug)]
 pub struct OutOfRangeError;
 
@@ -30,10 +36,17 @@ pub struct OutOfRangeError;
 pub struct FrameIndex(u16);
 
 impl FrameIndex {
+    /// The maximum frame index.
     pub const MAX: u16 = 0x1FF;
 
+    /// The index of the topmost stack frame.
     pub const TOP_FRAME: FrameIndex = FrameIndex(0);
 
+    /// Create a frame index from the given integer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutOfRangeError`] if the value is larger than [`FrameIndex::MAX`].
     pub fn create(val: i64) -> Result<Self, OutOfRangeError> {
         if val > Self::MAX.into() {
             Err(OutOfRangeError)
@@ -83,6 +96,11 @@ impl VariableIndex {
     /// A variable index reprsenting a scope root.
     pub const SCOPE: VariableIndex = VariableIndex(0);
 
+    /// Create a variable reference from the given value.
+    ///
+    /// #Errors
+    ///
+    /// Returns [`OutOfRangeError`] if the value is larger than [`VariableIndex::MAX`].
     pub fn create(val: u32) -> Result<Self, OutOfRangeError> {
         if val > Self::MAX {
             Err(OutOfRangeError)
@@ -105,9 +123,6 @@ impl From<VariableIndex> for u64 {
 }
 
 impl From<VariableIndex> for usize {
-    /// Convert a variable index to a 'usize'. This is guaranteed to work on any
-    /// platform where usize >= 32 bits, and Unreal doesn't run on any platforms
-    /// where this isn't the case.
     fn from(val: VariableIndex) -> Self {
         val.0.try_into().unwrap()
     }
@@ -122,11 +137,16 @@ impl Display for VariableIndex {
 /// Representation of a breakpoint.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Breakpoint {
+    /// The qualified name (`package.class`) for the class containing the breakpoint.
     pub qualified_name: String,
+    /// The line number for the breakpoint.
+    ///
+    /// Internally lines are always 1-indexed, regardless of the client settings.
     pub line: i32,
 }
 
 impl Breakpoint {
+    /// Create a new breakpoint instance for the given qualified name and line.
     pub fn new(qualified_name: &str, line: i32) -> Breakpoint {
         Breakpoint {
             qualified_name: qualified_name.to_string(),
@@ -135,30 +155,44 @@ impl Breakpoint {
     }
 }
 
+/// A message representing a request from the adapter to the interface to
+/// list stack frame entries. Will result in a [`StackTraceResponse`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StackTraceRequest {
+    /// The first frame to return. 0 is the topmost frame.
     pub start_frame: u32,
+    /// The number of frames to return, or 0 for "all frames".
     pub levels: u32,
 }
 
+/// A response to a [`StackTraceRequest`] message.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StackTraceResponse {
+    /// A vector of requested frames. The returned vector may be shorter
+    /// than the initial request's `levels` field.
     pub frames: Vec<Frame>,
 }
 
 /// A callstack frame.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Frame {
+    /// The name of the function for this frame.
     pub function_name: String,
+    /// The qualified name of the class for this frame.
     pub qualified_name: String,
+    /// A line number for this frame. Note that this may be '0', indicating
+    /// the line is unknown.
     pub line: i32,
 }
 
 /// The kind of watch, e.g. scope or user-defined watches.
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum WatchKind {
+    /// A local variable
     Local,
+    /// A global (i.e. class) variable
     Global,
+    /// A user watch
     User,
 }
 
@@ -182,11 +216,19 @@ impl WatchKind {
 /// some clients that differentiate between 'named' and 'indexed' children.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Variable {
+    /// The name of the variable
     pub name: String,
+    /// The type of the variable, if available. May also be a marker type such
+    /// as for a base class.
     pub ty: String,
+    /// The value of the variable as a string.
     pub value: String,
+    /// The index of this variable within its container, which could be a frame
+    /// or another variable.
     pub index: VariableIndex,
+    /// True if this variable has children.
     pub has_children: bool,
+    /// True if this variable is an array type.
     pub is_array: bool,
 }
 
@@ -202,8 +244,6 @@ pub enum UnrealCommand {
     /// Determine the number of watches of the given kind in the currently active
     /// frame.
     WatchCount(WatchKind, VariableIndex),
-    /// Retreive information about a particular frame.
-    Frame(FrameIndex),
     /// Retreive variables. This returns all children of a particular parent (either a scope or
     /// a structured variable).
     Variables(WatchKind, FrameIndex, VariableIndex, usize, usize),
@@ -220,13 +260,13 @@ pub enum UnrealCommand {
     /// Step over the next statement
     Next,
 
-    // Step into the next statement
+    /// Step into the next statement
     StepIn,
 
-    // Step out of the current function
+    /// Step out of the current function
     StepOut,
 
-    // Stop debugging - the client has disconnected.
+    /// Stop debugging - the client has disconnected.
     Disconnect,
 }
 
@@ -234,13 +274,23 @@ pub enum UnrealCommand {
 /// in a well-defined order in response to a command from the adapter.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum UnrealResponse {
+    /// A breakpoint has been added.
     BreakpointAdded(Breakpoint),
+    /// A breakpoint has been removed.
     BreakpointRemoved(Breakpoint),
+    /// A list of zero or more stack frames.
     StackTrace(StackTraceResponse),
+    /// The number of watches found.
     WatchCount(usize),
-    Frame(Option<Frame>),
-    DeferredVariables(Vec<Variable>),
+    /// A response to a [`UnrealRequest.Variables`] request with a list of variables
+    /// that were immediately accessible.
     Variables(Vec<Variable>),
+    /// A response to a [`UnrealRequest.Variables`] request with a list of variables
+    /// that required the debugger to change the current stack frame. This can be
+    /// used by the adapter to invalidate the stack frame prompting a request of
+    /// the frame information again.
+    DeferredVariables(Vec<Variable>),
+    /// The result of a variable evaluation (i.e. a user watch).
     Evaluate(Option<Variable>),
 }
 
@@ -261,6 +311,10 @@ pub enum UnrealEvent {
 /// split out by the adapter into separate channels for easier processing.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UnrealInterfaceMessage {
+    /// A response to an UnrealCommand. These can only be sent as a response to
+    /// a command from the adapter.
     Response(UnrealResponse),
+    /// An event. These can occur at any time without any intervention from the
+    /// adapter.
     Event(UnrealEvent),
 }

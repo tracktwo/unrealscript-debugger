@@ -1,8 +1,8 @@
 pub mod tcp;
 
 use common::{
-    Breakpoint, Frame, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand,
-    UnrealEvent, UnrealResponse, Variable, VariableIndex, WatchKind,
+    Breakpoint, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent,
+    UnrealResponse, Variable, VariableIndex, WatchKind,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
@@ -104,11 +104,6 @@ pub trait Connection: Send {
     ) -> Result<usize, ConnectionError> {
         self.send_command(UnrealCommand::WatchCount(kind, parent))?;
         expect_response!(self.next_response(), UnrealResponse::WatchCount)
-    }
-
-    fn frame(&mut self, frame: FrameIndex) -> Result<Option<Frame>, ConnectionError> {
-        self.send_command(UnrealCommand::Frame(frame))?;
-        expect_response!(self.next_response(), UnrealResponse::Frame)
     }
 
     fn evaluate(&mut self, expr: &str) -> Result<Option<Variable>, ConnectionError> {

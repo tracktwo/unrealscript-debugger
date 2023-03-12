@@ -117,7 +117,7 @@ pub enum DebuggerError {
 /// The 'AddBreakpoint' command requires us to tell Unreal to add the breakpoint,
 /// and this will immediately trigger a call to the 'AddBreakpoint' debugger
 /// interface API. This is represented by the 'Callback' variant where the string
-/// to pass to the callback (e.g. 'addbreakpoint <file> <line>') is part of the
+/// to pass to the callback (e.g. 'addbreakpoint `<file>` `<line>`) is part of the
 /// variant.
 pub enum CommandAction {
     /// No action is necessary, the command is self-contained. e.g. StackTrace.
@@ -216,13 +216,6 @@ impl Debugger {
                 log::trace!("WatchCount: {kind:?}");
                 let count = self.watch_count(kind, parent.into());
                 self.send_response(UnrealResponse::WatchCount(count))?;
-                Ok(CommandAction::Nothing)
-            }
-            UnrealCommand::Frame(idx) => {
-                log::trace!("Frame: {idx}");
-                let frame = self.callstack.iter().nth_back(idx.into());
-                log::trace!("The {idx}th frame is {frame:#?}");
-                self.send_response(UnrealResponse::Frame(frame.cloned()))?;
                 Ok(CommandAction::Nothing)
             }
             UnrealCommand::Variables(kind, frame, parent, start, count) => {

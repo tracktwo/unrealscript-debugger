@@ -10,7 +10,7 @@ pub struct BadFilenameError;
 /// Given a Source entry with a full path to a source file we expect the path to always
 /// be of the form:
 ///
-/// <arbitrary leading directories>\Src\PackageName\Classes\ClassName.uc
+/// &lt;arbitrary leading directories&gt;\Src\PackageName\Classes\ClassName.uc
 ///
 /// From a path of this form we can isolate the package and class names. This naming
 /// scheme is mandatory: the Unreal debugger only talks about package and class names,

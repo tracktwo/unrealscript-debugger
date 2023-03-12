@@ -1,6 +1,6 @@
 //! # Unrealscript Debugger
 //! Module for the Unrealscript debugger interface.
-//! See https://docs.unrealengine.com/udk/Three/DebuggerInterface.html
+//! See <https://docs.unrealengine.com/udk/Three/DebuggerInterface.html>
 //!
 //! Unreal controls the lifetime this library, and does not provide much of
 //! any error handling or recovery mechanisms. If any of the expected invariants

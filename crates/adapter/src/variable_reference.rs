@@ -1,7 +1,7 @@
 //! Variable References
 //!
 //! DAP refers to variables with references, see "Lifetime of Object References" in
-//! https://microsoft.github.io/debug-adapter-protocol/overview. DAP specifies these as 'numbers',
+//! <https://microsoft.github.io/debug-adapter-protocol/overview>. DAP specifies these as 'numbers',
 //! which are mapped to i64 values by the dap-rs crate but DAP only supports variable references in
 //! the open interval (0-2^31). That is, it must be a non-negative number that fits in an i32.
 //!
@@ -21,10 +21,10 @@
 //!
 //! <Bit 31> 0WWFFFFF FFFFVVVV VVVVVVVV VVVVVVVV <bit 0>
 //!
-//! - The topmost bit [31] is always 0.
-//! - 2 bits [29-30] are allocated to the watch kind.
-//! - 9 bits [20-28] are allocated to the frame index.
-//! - 20 bits [0-19] are allocated to the variable index.
+//! - The topmost bit 31 is always 0.
+//! - 2 bits 29-30 are allocated to the watch kind.
+//! - 9 bits 20-28 are allocated to the frame index.
+//! - 20 bits 0-19 are allocated to the variable index.
 //!
 //! This scheme puts some severe limits on the total number of frames and variables within
 //! a frame that can be supported, but it allows trivial mapping between variable references

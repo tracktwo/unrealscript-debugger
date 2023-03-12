@@ -909,10 +909,6 @@ mod tests {
             unreachable!()
         }
 
-        fn frame(&mut self, _frame: FrameIndex) -> Result<Option<common::Frame>, ConnectionError> {
-            unreachable!()
-        }
-
         fn evaluate(&mut self, _expr: &str) -> Result<Option<Variable>, ConnectionError> {
             unreachable!()
         }
