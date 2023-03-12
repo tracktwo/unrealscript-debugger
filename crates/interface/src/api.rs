@@ -156,8 +156,11 @@ pub extern "C" fn RemoveBreakpoint(class_name: *const c_char, line: i32) {
 
 #[no_mangle]
 pub extern "C" fn EditorLoadClass(_class_name: *const c_char) {
-    log::trace!("EditorLoadClass");
-    // TODO Implement
+    // For our purposes this API is not necessary. This gets send on a break
+    // and any changestack command to indicate what source file to show. But
+    // the full filenames of each stack frame are also sent in the CallStackAdd
+    // command, and we use this information instead. When switching frames
+    // we already know the filename for the frame we switched to.
 }
 
 #[no_mangle]
@@ -188,7 +191,6 @@ pub extern "C" fn CallStackAdd(class_name: *const c_char) {
     log::trace!("CallStackAdd");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
-    // TODO: The line is not available.
     dbg.add_frame(class_name);
 }
 

@@ -146,7 +146,6 @@ pub struct StackTraceResponse {
     pub frames: Vec<Frame>,
 }
 
-// TODO Should this be clone?
 /// A callstack frame.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Frame {

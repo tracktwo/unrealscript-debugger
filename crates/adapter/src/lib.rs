@@ -446,7 +446,6 @@ where
                 continue;
             }
 
-            // TODO: Remove the \\? prefix if present.
             let canonical = candidate
                 .canonicalize()
                 .map_err(|e| {
@@ -460,9 +459,12 @@ where
                 log::error!("Failed to stringize path {candidate:#?}");
                 return None;
             }
-            let str = path.unwrap().to_string();
-            log::info!("Mapped {package}.{class} -> {str}");
-            return Some(str);
+
+            // Strip the UNC prefix canonicalize added. This is not strictly necessary but makes
+            // the pathnames look nicer in the editor.
+            let str = path.and_then(|s| s.strip_prefix("\\\\?\\"));
+            log::info!("Mapped {package}.{class} -> {str:?}");
+            return str.map(|s| s.to_owned());
         }
 
         log::warn!("No source file found for {package}.{class}");
@@ -531,7 +533,6 @@ where
         &mut self,
         _args: &DisconnectArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        // TODO send a 'stopdebugging' command, and shut down our event loop.
         self.connection.disconnect()?;
         Ok(ResponseBody::Disconnect)
     }

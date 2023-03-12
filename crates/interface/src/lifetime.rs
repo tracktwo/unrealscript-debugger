@@ -181,15 +181,16 @@ async fn handle_connection(
     crx: &mut Receiver<()>,
 ) -> Result<ConnectionResult, tokio::io::Error> {
     // Create a new message passing channel and send the sender to the debugger.
+    // It's convenient to have a per-connection message channel as it also serves
+    // as an indicator within the debugger to tell if the interface is connected.
     let (etx, mut erx) = mpsc::channel(128);
 
     {
-        // TODO Remove this: have the channel persist across connections by moving
-        // it to the constructor for the debugger.
         let mut hnd = DEBUGGER.lock().unwrap();
         let dbg = hnd.as_mut().unwrap();
         dbg.new_connection(etx);
     }
+
     let (reader, writer) = stream.split();
     let delimiter = FramedRead::new(reader, LengthDelimitedCodec::new());
 
@@ -220,8 +221,12 @@ async fn handle_connection(
             },
             evt = erx.recv() => {
                 match evt {
-                    // TODO fix unwrap
-                    Some(evt) => serializer.send(evt).await.unwrap(),
+                    Some(evt) => if let Err(e) = serializer.send(evt).await {
+                        // If we fail to send the packet then the connection has been
+                        // interrupted and we can return.
+                        log::error!("Error sending event to adapter: {e}");
+                        break
+                    },
                     None => break,
                 };
             },
@@ -253,11 +258,6 @@ fn dispatch_command(command: UnrealCommand) -> CommandAction {
     match dbg.handle_command(command) {
         Ok(action) => action,
 
-        // TODO fix the error cases.
-        Err(DebuggerError::InitializeFailure) => {
-            log::error!("Failed to initialize");
-            CommandAction::Nothing
-        }
         Err(DebuggerError::NotConnected) => {
             log::error!("Not connected");
             CommandAction::Nothing

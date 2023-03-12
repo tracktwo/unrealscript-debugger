@@ -83,10 +83,10 @@ impl Watch {
     }
 }
 
+/// An type to represent the errors that can occur when sending or processing
+/// commands.
 #[derive(Error, Debug)]
 pub enum DebuggerError {
-    #[error("Failed to initialize")]
-    InitializeFailure,
     #[error("Not connected")]
     NotConnected,
 }
