@@ -35,9 +35,6 @@
 //!
 //! The 'initialize' function is used to set up the debugger state when we are
 //! starting a debugging session.
-//!
-//! The 'uninitialize' function is used to clean up state when we are ending
-//! a debugging session.
 
 use std::{
     net::SocketAddr,
@@ -76,7 +73,7 @@ pub static VARIABLE_REQUST_CONDVAR: Condvar = Condvar::new();
 /// Unreal first initializes us. Responsible for building the shared state object
 /// the other Unreal entry points will use and spawning the main loop thread
 /// that will perform I/O with the debugger adapter.
-pub fn initialize(cb: UnrealCallback) -> () {
+pub fn initialize(cb: UnrealCallback) {
     if let Ok(dbg) = DEBUGGER.lock().as_mut() {
         assert!(dbg.is_none(), "Initialize already called.");
 
@@ -121,10 +118,6 @@ pub fn initialize(cb: UnrealCallback) -> () {
         dbg.replace(Debugger::new(ctx, Some(handle)));
     }
 }
-
-/// Shut down the debugger instance. This must clean up all resources and stop any
-/// running threads -- Unreal is about to unload this DLL completely.
-pub fn uninitialize() -> () {}
 
 /// Initialize the logging interface.
 fn init_logger() -> Result<(), FlexiLoggerError> {
@@ -257,7 +250,7 @@ fn dispatch_command(command: UnrealCommand) -> CommandAction {
         }
     }
     let dbg = hnd.as_mut().unwrap();
-    return match dbg.handle_command(command) {
+    match dbg.handle_command(command) {
         Ok(action) => action,
 
         // TODO fix the error cases.
@@ -269,5 +262,5 @@ fn dispatch_command(command: UnrealCommand) -> CommandAction {
             log::error!("Not connected");
             CommandAction::Nothing
         }
-    };
+    }
 }

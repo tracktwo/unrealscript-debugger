@@ -24,7 +24,7 @@ impl LogClient {
 impl AsyncClient for LogClient {
     type St = ReceiverStream<Result<Request, std::io::Error>>;
 
-    fn next_request<'a>(&'a mut self) -> futures::stream::Next<'a, Self::St> {
+    fn next_request(&mut self) -> futures::stream::Next<'_, Self::St> {
         self.rstream.next()
     }
 

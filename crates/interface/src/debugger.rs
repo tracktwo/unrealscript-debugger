@@ -1,6 +1,5 @@
 use futures::executor;
 use std::ffi::{c_char, CStr};
-use std::ptr;
 use std::thread::JoinHandle;
 use textcode::iso8859_1;
 use thiserror::Error;
@@ -298,38 +297,38 @@ impl Debugger {
                     start: 0,
                     count: 0,
                 });
-                return Ok(CommandAction::Callback(self.encode_string(&str)));
+                Ok(CommandAction::Callback(self.encode_string(&str)))
             }
             UnrealCommand::Pause => {
                 log::trace!("Pause");
                 let str = "break";
-                Ok(CommandAction::Callback(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(str)))
             }
             UnrealCommand::Go => {
                 log::trace!("Go");
                 let str = "go";
-                Ok(CommandAction::Callback(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(str)))
             }
             UnrealCommand::Next => {
                 log::trace!("Next");
                 let str = "stepover";
-                Ok(CommandAction::Callback(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(str)))
             }
             UnrealCommand::StepIn => {
                 log::trace!("StepIn");
                 let str = "stepinto";
-                Ok(CommandAction::Callback(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(str)))
             }
             UnrealCommand::StepOut => {
                 log::trace!("StepOut");
                 let str = "stepoutof";
-                Ok(CommandAction::Callback(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(str)))
             }
             UnrealCommand::Disconnect => {
                 log::trace!("Disconnect");
                 self.disconnect();
                 let str = "stopdebugging";
-                Ok(CommandAction::Callback(self.encode_string(&str)))
+                Ok(CommandAction::Callback(self.encode_string(str)))
             }
         }
     }
@@ -337,7 +336,7 @@ impl Debugger {
     /// The adapter has requested we disconnect. This cleans up our internal
     /// state for the debugging session -- no more messages can be sent or received
     /// until a new session is established.
-    fn disconnect(&mut self) -> () {
+    fn disconnect(&mut self) {
         // Drop our references to the communications channels.
         self.response_channel.take();
 
@@ -445,7 +444,7 @@ impl Debugger {
     ///  We don't need to implement a complex state machine to track this, however, since we will
     ///  only get this spurious ShowDllForm once during initialization. So: just ignore the first
     ///  call we see, and from then on treat any ShowDllForm call as a break.
-    pub fn show_dll_form(&mut self) -> () {
+    pub fn show_dll_form(&mut self) {
         self.current_frame = FrameIndex::TOP_FRAME;
         if !self.saw_show_dll {
             // This was the first spurious call to show dll. Just remember we saw it but do
@@ -472,17 +471,17 @@ impl Debugger {
     }
 
     /// Add a class to the debugger's class hierarchy.
-    pub fn add_class_to_hierarchy(&mut self, arg: *const c_char) -> () {
+    pub fn add_class_to_hierarchy(&mut self, arg: *const c_char) {
         let str = self.decode_string(arg);
         self.class_hierarchy.push(str);
     }
 
     /// Clear the class hierarchy.
-    pub fn clear_class_hierarchy(&mut self) -> () {
+    pub fn clear_class_hierarchy(&mut self) {
         self.class_hierarchy.clear();
     }
 
-    pub fn clear_watch(&mut self, kind: WatchKind) -> () {
+    pub fn clear_watch(&mut self, kind: WatchKind) {
         let list = self.get_watches(kind);
         list.clear();
 
@@ -524,7 +523,7 @@ impl Debugger {
         // The given parent must be a member of our vector already.
         // We should have already introduced the 'root' node at index 0 when
         // we cleared the watches.
-        assert!(parent < vec.len().try_into().unwrap());
+        assert!(parent < vec.len());
 
         // Add the new entry to the vector and return an identifier for it:
         // the index of this entry in the vector.
@@ -540,63 +539,58 @@ impl Debugger {
         new_entry.try_into().unwrap()
     }
 
-    pub fn lock_watchlist(&mut self) -> () {}
+    pub fn lock_watchlist(&mut self) {}
 
     /// Unreal has unlocked a watchlist. We don't perform any locking of the watchlist but this
     /// is the last signal we get after switching stack frames, so we can use this to complete
     /// a pending variable request.
-    pub fn unlock_watchlist(&mut self, kind: WatchKind) -> () {
-        match kind {
-            // The user watchlist is always unlocked last when dumping a frame, and also is locked
-            // and unlocked when registering a new user watch. Pending responses are sent only for
-            // this kind.
-            WatchKind::User => {
-                if let Some(req) = self.pending_variable_request.take() {
-                    // Update the current stack frame to represent the new state.
-                    self.current_frame = req.frame;
+    pub fn unlock_watchlist(&mut self, kind: WatchKind) {
+        // The user watchlist is always unlocked last when dumping a frame, and also is locked
+        // and unlocked when registering a new user watch. Pending responses are sent only for
+        // this kind.
+        if let WatchKind::User = kind {
+            if let Some(req) = self.pending_variable_request.take() {
+                // Update the current stack frame to represent the new state.
+                self.current_frame = req.frame;
 
-                    // If this pending request is a user watch we want to send back an 'Evaluate'
-                    // reponse, otherwise we want to send a 'Variables' response.
-                    match req.kind {
-                        WatchKind::User => {
-                            // The new user watch will be the last one added to the user watchlist,
-                            // so it's the last child of the root.
-                            let var = self.user_watches.get(0).and_then(|n| {
-                                n.children
-                                    .last()
-                                    .and_then(|c| Some(self.user_watches[*c].to_variable(*c)))
-                            });
-                            if var.is_none() {
-                                log::error!("User watchlist unlocked from a pending user watch but watchlist is empty!");
-                            }
-                            self.send_response(UnrealResponse::Evaluate(var))
-                                .unwrap_or_else(|_| {
-                                    log::error!("Failed to send response for user watch");
-                                });
+                // If this pending request is a user watch we want to send back an 'Evaluate'
+                // reponse, otherwise we want to send a 'Variables' response.
+                match req.kind {
+                    WatchKind::User => {
+                        // The new user watch will be the last one added to the user watchlist,
+                        // so it's the last child of the root.
+                        let var = self.user_watches.get(0).and_then(|n| {
+                            n.children
+                                .last()
+                                .map(|c| self.user_watches[*c].to_variable(*c))
+                        });
+                        if var.is_none() {
+                            log::error!("User watchlist unlocked from a pending user watch but watchlist is empty!");
                         }
-                        _ => {
-                            // Send the response to the adapter so it can proceed.
-                            self.send_variable_response(
-                                req.kind, req.parent, req.start, req.count, true,
-                            )
+                        self.send_response(UnrealResponse::Evaluate(var))
                             .unwrap_or_else(|_| {
-                                log::error!(
-                                    "Failed to send response for deferred variable request"
-                                );
+                                log::error!("Failed to send response for user watch");
                             });
-                        }
                     }
-
-                    // Signal the variable request condvar so we can unblock the command processing thread.
-                    VARIABLE_REQUST_CONDVAR.notify_one();
+                    _ => {
+                        // Send the response to the adapter so it can proceed.
+                        self.send_variable_response(
+                            req.kind, req.parent, req.start, req.count, true,
+                        )
+                        .unwrap_or_else(|_| {
+                            log::error!("Failed to send response for deferred variable request");
+                        });
+                    }
                 }
+
+                // Signal the variable request condvar so we can unblock the command processing thread.
+                VARIABLE_REQUST_CONDVAR.notify_one();
             }
-            _ => (),
         }
     }
 
     /// A breakpoint has been added.
-    pub fn add_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
+    pub fn add_breakpoint(&mut self, name: *const c_char, line: i32) {
         let bp = Breakpoint {
             qualified_name: self.decode_string(name),
             line,
@@ -608,7 +602,7 @@ impl Debugger {
     }
 
     /// A breakpoint has been removed.
-    pub fn remove_breakpoint(&mut self, name: *const c_char, line: i32) -> () {
+    pub fn remove_breakpoint(&mut self, name: *const c_char, line: i32) {
         let bp = Breakpoint {
             qualified_name: self.decode_string(name),
             line,
@@ -620,12 +614,12 @@ impl Debugger {
     }
 
     /// Clear the callstack.
-    pub fn clear_callstack(&mut self) -> () {
+    pub fn clear_callstack(&mut self) {
         self.callstack.clear();
     }
 
     /// Add a frame to the callstack.
-    pub fn add_frame(&mut self, class_name: *const c_char) -> () {
+    pub fn add_frame(&mut self, class_name: *const c_char) {
         // The "name" provided by Unreal is of the form 'Function ClassName:FunctionName'.
         //
         let name = self.decode_string(class_name);
@@ -677,7 +671,7 @@ impl Debugger {
                 .rev()
                 .skip(start)
                 .take(levels)
-                .map(|e| e.clone())
+                .cloned()
                 .collect(),
         }
     }
@@ -687,7 +681,7 @@ impl Debugger {
     }
 
     /// Record the current object name. This is updated each time unreal stops.
-    pub fn current_object_name(&mut self, obj_name: *const c_char) -> () {
+    pub fn current_object_name(&mut self, obj_name: *const c_char) {
         self.current_object_name = Some(self.decode_string(obj_name));
     }
 
@@ -700,7 +694,7 @@ impl Debugger {
     /// format (see MAGIC_DISCONNECT_STRING). When we receive this this is the last callback
     /// we'll get before Unreal unloads our DLL, so we really need to stop the thread we
     /// spawned before this happens or the game will crash.
-    pub fn add_line_to_log(&mut self, text: *const c_char) -> () {
+    pub fn add_line_to_log(&mut self, text: *const c_char) {
         let mut str = self.decode_string(text);
 
         if let Some(sender) = &mut self.response_channel {
@@ -780,7 +774,7 @@ impl Debugger {
     }
 
     /// Set the current line.
-    pub fn goto_line(&mut self, line: i32) -> () {
+    pub fn goto_line(&mut self, line: i32) {
         // If we have a pending variable request then this is the line for our frame.
         if let Some(var) = &self.pending_variable_request {
             // Set the line number in the frame we are moving to.
@@ -822,17 +816,17 @@ impl Debugger {
                 // Note that we don't have to worry about class names like MyArray incorrectly
                 // being treated as arrays as the type will be 'Object' or 'Struct', the actual
                 // name of the type does not appear here.
-                let is_array = ty.find("Array").is_some();
+                let is_array = ty.contains("Array");
                 return (name.to_string(), Some(ty.to_string()), Some(is_array));
             }
         }
         // The name string is of the form '[[ Base Class ]]'
-        else if let Some(_) = str.find("[[") {
+        else if str.contains("[[") {
             return (str, Some("base class".to_string()), Some(false));
         }
         // The name string is of the form 'ParentName[idx]'
         // TODO: What about arrays of arrays?
-        else if let Some(_) = str.find("[") {
+        else if str.contains('[') {
             return (str, Some("array element".to_string()), Some(false));
         }
 
@@ -860,7 +854,7 @@ impl Debugger {
 
     /// A new connection has been established from the adapter. Record the tcp stream used to send
     /// events.
-    pub fn new_connection(&mut self, tx: mpsc::Sender<UnrealInterfaceMessage>) -> () {
+    pub fn new_connection(&mut self, tx: mpsc::Sender<UnrealInterfaceMessage>) {
         self.response_channel = Some(tx);
 
         // The debugger stopped before we connected (e.g. due to -autoDebug). Send a stopped
@@ -878,7 +872,7 @@ pub struct UnknownCommandError;
 
 /// Convert an unreal C string pointer to a CStr.
 fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
-    if raw != ptr::null() {
+    if !raw.is_null() {
         unsafe { return CStr::from_ptr(raw) }
     }
 
@@ -1204,7 +1198,7 @@ mod tests {
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "Location");
         assert_eq!(ty.unwrap(), "Struct");
-        assert_eq!(is_array.unwrap(), false);
+        assert!(!is_array.unwrap());
     }
 
     #[test]
@@ -1215,7 +1209,7 @@ mod tests {
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "CharacterStats");
         assert_eq!(ty.unwrap(), "Static Struct Array");
-        assert_eq!(is_array.unwrap(), true);
+        assert!(is_array.unwrap());
     }
 
     #[test]
@@ -1226,7 +1220,7 @@ mod tests {
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "AWCAbilities");
         assert_eq!(ty.unwrap(), "Array");
-        assert_eq!(is_array.unwrap(), true);
+        assert!(is_array.unwrap());
     }
 
     #[test]
@@ -1237,7 +1231,7 @@ mod tests {
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "[[ Object ]]");
         assert_eq!(ty.unwrap(), "base class");
-        assert_eq!(is_array.unwrap(), false);
+        assert!(!is_array.unwrap());
     }
 
     #[test]
@@ -1248,6 +1242,6 @@ mod tests {
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
         assert_eq!(name, "SomeArray[0]");
         assert_eq!(ty.unwrap(), "array element");
-        assert_eq!(is_array.unwrap(), false);
+        assert!(!is_array.unwrap());
     }
 }

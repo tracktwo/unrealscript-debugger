@@ -85,9 +85,9 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                     match request {
                         Some(Ok(request)) => {
                             match &request.command {
-                                Command::Initialize(args) => self.initialize(&request, &args)?,
-                                Command::Attach(args) => return self.attach(&request, &args).await,
-                                Command::Launch(args) => return self.launch(&request, &args).await,
+                                Command::Initialize(args) => self.initialize(&request, args)?,
+                                Command::Attach(args) => return self.attach(&request, args).await,
+                                Command::Launch(args) => return self.launch(&request, args).await,
                                 Command::Disconnect(_) => {
                                     log::info!("Received disconnect message during connection phase.");
                                     return Err(DisconnectedAdapterError::NoConnection(self));
@@ -129,7 +129,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
 
         // Send the response.
         self.client.respond(Response::make_success(
-            &req,
+            req,
             ResponseBody::Initialize(Some(Capabilities {
                 supports_configuration_done_request: Some(true),
                 supports_delayed_stack_trace_loading: Some(true),
@@ -169,27 +169,26 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     ) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
         log::info!("Attach request");
         let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
-        self.config.source_roots =
-            Self::extract_source_roots(&args.other).unwrap_or_else(|| vec![]);
+        self.config.source_roots = Self::extract_source_roots(&args.other).unwrap_or_default();
         match self.connect_to_interface(port).await {
             Ok(connection) => {
                 // Connection succeeded: Respond with a success response and return
                 // the conneted adapter.
                 self.client
-                    .respond(Response::make_success(&req, ResponseBody::Attach))?;
+                    .respond(Response::make_success(req, ResponseBody::Attach))?;
 
-                return Ok(UnrealscriptAdapter::new(
+                Ok(UnrealscriptAdapter::new(
                     self.client,
                     self.config,
                     Box::new(connection),
                     None,
-                ));
+                ))
             }
             Err(e) => {
                 // Connection failed.
                 self.client
-                    .respond(Response::make_error(&req, e.to_error_message()))?;
-                return Err(DisconnectedAdapterError::NoConnection(self));
+                    .respond(Response::make_error(req, e.to_error_message()))?;
+                Err(DisconnectedAdapterError::NoConnection(self))
             }
         }
     }
@@ -208,8 +207,8 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         let program_args = Self::extract_args(&args.other);
 
         let mut command = &mut std::process::Command::new(program);
-        if program_args.is_some() {
-            command = command.args(program_args.unwrap());
+        if let Some(a) = program_args {
+            command = command.args(a);
             log::info!("Program args are {:#?}", command.get_args());
         }
 
@@ -262,10 +261,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         // will not try to debug. We could get a later 'attach' request, in which case we can
         // attach, but that also requires the user to enable the debugger from the unreal side with
         // 'toggledebugger'.
-        let auto_debug = match args.no_debug {
-            Some(true) => false,
-            _ => true,
-        };
+        let auto_debug = !matches!(args.no_debug, Some(true));
 
         match self.spawn_debuggee(args, auto_debug) {
             Ok(child) => {
@@ -278,21 +274,21 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                             self.client
                                 .respond(Response::make_success(req, ResponseBody::Launch))?;
                             self.config.source_roots =
-                                Self::extract_source_roots(&args.other).unwrap_or_else(|| vec![]);
+                                Self::extract_source_roots(&args.other).unwrap_or_default();
 
-                            return Ok(UnrealscriptAdapter::new(
+                            Ok(UnrealscriptAdapter::new(
                                 self.client,
                                 self.config,
                                 Box::new(connection),
                                 Some(child),
-                            ));
+                            ))
                         }
                         Err(e) => {
                             // We launched, but failed to connect.
                             log::error!("Successfully launched program but failed to connect: {e}");
                             self.client
-                                .respond(Response::make_error(&req, e.to_error_message()))?;
-                            return Err(DisconnectedAdapterError::NoConnection(self));
+                                .respond(Response::make_error(req, e.to_error_message()))?;
+                            Err(DisconnectedAdapterError::NoConnection(self))
                         }
                     }
                 } else {
@@ -301,14 +297,14 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                     log::info!("Launch request succeeded but autodebug is disabled. Remaining disconnected.");
                     self.client
                         .respond(Response::make_success(req, ResponseBody::Launch))?;
-                    return Err(DisconnectedAdapterError::NoConnection(self));
+                    Err(DisconnectedAdapterError::NoConnection(self))
                 }
             }
             Err(e) => {
                 // We failed to launch the debuggee. Send an error response
                 self.client
-                    .respond(Response::make_error(&req, e.to_error_message()))?;
-                return Err(DisconnectedAdapterError::NoConnection(self));
+                    .respond(Response::make_error(req, e.to_error_message()))?;
+                Err(DisconnectedAdapterError::NoConnection(self))
             }
         }
     }

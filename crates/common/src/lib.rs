@@ -43,21 +43,21 @@ impl FrameIndex {
     }
 }
 
-impl Into<usize> for FrameIndex {
-    fn into(self) -> usize {
-        self.0.into()
+impl From<FrameIndex> for usize {
+    fn from(val: FrameIndex) -> Self {
+        val.0.into()
     }
 }
 
-impl Into<u64> for FrameIndex {
-    fn into(self) -> u64 {
-        self.0.into()
+impl From<FrameIndex> for u64 {
+    fn from(val: FrameIndex) -> Self {
+        val.0.into()
     }
 }
 
-impl Into<i64> for FrameIndex {
-    fn into(self) -> i64 {
-        self.0.into()
+impl From<FrameIndex> for i64 {
+    fn from(val: FrameIndex) -> Self {
+        val.0.into()
     }
 }
 
@@ -92,24 +92,24 @@ impl VariableIndex {
     }
 }
 
-impl Into<u32> for VariableIndex {
-    fn into(self) -> u32 {
-        self.0
+impl From<VariableIndex> for u32 {
+    fn from(val: VariableIndex) -> Self {
+        val.0
     }
 }
 
-impl Into<u64> for VariableIndex {
-    fn into(self) -> u64 {
-        self.0.into()
+impl From<VariableIndex> for u64 {
+    fn from(val: VariableIndex) -> Self {
+        val.0.into()
     }
 }
 
-impl Into<usize> for VariableIndex {
+impl From<VariableIndex> for usize {
     /// Convert a variable index to a 'usize'. This is guaranteed to work on any
     /// platform where usize >= 32 bits, and Unreal doesn't run on any platforms
     /// where this isn't the case.
-    fn into(self) -> usize {
-        self.0.try_into().unwrap()
+    fn from(val: VariableIndex) -> Self {
+        val.0.try_into().unwrap()
     }
 }
 

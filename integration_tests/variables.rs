@@ -49,7 +49,7 @@ async fn frame_0() {
             assert_eq!(v.type_field.as_ref().unwrap(), "Int");
             assert_eq!(v.value, "33");
         }
-        o => assert!(false, "Expected a variables response: {o:#?}"),
+        o => panic!("Expected a variables response: {o:#?}"),
     }
 }
 
@@ -105,7 +105,7 @@ async fn frame_2() {
             assert_eq!(v.type_field.as_ref().unwrap(), "Int");
             assert_eq!(v.value, "33");
         }
-        o => assert!(false, "Expected a variables response: {o:#?}"),
+        o => panic!("Expected a variables response: {o:#?}"),
     }
 }
 // TODO Test source roots.

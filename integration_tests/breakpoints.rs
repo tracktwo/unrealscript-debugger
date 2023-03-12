@@ -53,7 +53,7 @@ async fn hit_breakpoint() {
 
     match response {
         ResponseBody::SetBreakpoints(_) => (),
-        o => assert!(false, "Expected a setbreakpoints response: {o:#?}"),
+        o => panic!("Expected a setbreakpoints response: {o:#?}"),
     }
 }
 
@@ -105,7 +105,7 @@ async fn remove_breakpoint() {
 
     match response {
         ResponseBody::SetBreakpoints(_) => (),
-        _o => assert!(false, "Expected a setbreakpoints response: {_o:#?}"),
+        _o => panic!("Expected a setbreakpoints response: {_o:#?}"),
     }
 
     // Set no breakpoints. This should generate a remove command to remove the first breakpoint.
@@ -125,6 +125,6 @@ async fn remove_breakpoint() {
 
     match response {
         ResponseBody::SetBreakpoints(_) => (),
-        _o => assert!(false, "Expected a setbreakpoints response: {_o:#?}"),
+        _o => panic!("Expected a setbreakpoints response: {_o:#?}"),
     }
 }

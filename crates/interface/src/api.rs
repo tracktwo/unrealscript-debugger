@@ -46,7 +46,7 @@ pub extern "C" fn ShowDllForm() {
 ///
 /// Tells the debugger the names of all currently loaded classes.
 #[no_mangle]
-pub extern "C" fn AddClassToHierarchy(class_name: *const c_char) -> () {
+pub extern "C" fn AddClassToHierarchy(class_name: *const c_char) {
     log::trace!("AddClassToHierarchy");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -55,7 +55,7 @@ pub extern "C" fn AddClassToHierarchy(class_name: *const c_char) -> () {
 
 /// Clear the class hierarchy in the debugger state.
 #[no_mangle]
-pub extern "C" fn ClearClassHierarchy() -> () {
+pub extern "C" fn ClearClassHierarchy() {
     log::trace!("ClearClassHierarchy");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -64,13 +64,13 @@ pub extern "C" fn ClearClassHierarchy() -> () {
 
 /// ???
 #[no_mangle]
-pub extern "C" fn BuildClassHierarchy() -> () {
+pub extern "C" fn BuildClassHierarchy() {
     log::trace!("BuildClassHierarchy");
 }
 
 /// Legacy version of ClearAWatch.
 #[no_mangle]
-pub extern "C" fn ClearWatch(kind: i32) -> () {
+pub extern "C" fn ClearWatch(kind: i32) {
     log::trace!("ClearWatch {kind}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -84,7 +84,7 @@ pub extern "C" fn ClearWatch(kind: i32) -> () {
 /// Used when rebuilding the watch list.
 /// This occurs each time the debugger breaks to refresh watches.
 #[no_mangle]
-pub extern "C" fn ClearAWatch(kind: i32) -> () {
+pub extern "C" fn ClearAWatch(kind: i32) {
     log::trace!("ClearAWatch {kind}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -120,7 +120,7 @@ pub extern "C" fn AddAWatch(
 /// Called before Unreal updates the watchlist of the given kind. This will be
 /// followed by some number of 'AddAWatch' calls, followed by 'UnlockList'.
 #[no_mangle]
-pub extern "C" fn LockList(_kind: i32) -> () {
+pub extern "C" fn LockList(_kind: i32) {
     log::trace!("LockList {_kind}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -131,7 +131,7 @@ pub extern "C" fn LockList(_kind: i32) -> () {
 ///
 /// Called after Unreal has finished updating the watchlist of the given kind.
 #[no_mangle]
-pub extern "C" fn UnlockList(kind: i32) -> () {
+pub extern "C" fn UnlockList(kind: i32) {
     log::trace!("UnlockList {kind}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -141,41 +141,41 @@ pub extern "C" fn UnlockList(kind: i32) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn AddBreakpoint(class_name: *const c_char, line: i32) -> () {
+pub extern "C" fn AddBreakpoint(class_name: *const c_char, line: i32) {
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.add_breakpoint(class_name, line);
 }
 
 #[no_mangle]
-pub extern "C" fn RemoveBreakpoint(class_name: *const c_char, line: i32) -> () {
+pub extern "C" fn RemoveBreakpoint(class_name: *const c_char, line: i32) {
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.remove_breakpoint(class_name, line);
 }
 
 #[no_mangle]
-pub extern "C" fn EditorLoadClass(_class_name: *const c_char) -> () {
+pub extern "C" fn EditorLoadClass(_class_name: *const c_char) {
     log::trace!("EditorLoadClass");
     // TODO Implement
 }
 
 #[no_mangle]
-pub extern "C" fn EditorGotoLine(line: i32, _highlight: i32) -> () {
+pub extern "C" fn EditorGotoLine(line: i32, _highlight: i32) {
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.goto_line(line);
 }
 
 #[no_mangle]
-pub extern "C" fn AddLineToLog(text: *const c_char) -> () {
+pub extern "C" fn AddLineToLog(text: *const c_char) {
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.add_line_to_log(text);
 }
 
 #[no_mangle]
-pub extern "C" fn CallStackClear() -> () {
+pub extern "C" fn CallStackClear() {
     log::trace!("CallStackClear");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -184,7 +184,7 @@ pub extern "C" fn CallStackClear() -> () {
 
 /// Add the given class name to the call stack. Call stacks are built bottom-up.
 #[no_mangle]
-pub extern "C" fn CallStackAdd(class_name: *const c_char) -> () {
+pub extern "C" fn CallStackAdd(class_name: *const c_char) {
     log::trace!("CallStackAdd");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -193,7 +193,7 @@ pub extern "C" fn CallStackAdd(class_name: *const c_char) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn SetCurrentObjectName(obj_name: *const c_char) -> () {
+pub extern "C" fn SetCurrentObjectName(obj_name: *const c_char) {
     log::trace!("SetCurrentObjectName");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
@@ -201,6 +201,6 @@ pub extern "C" fn SetCurrentObjectName(obj_name: *const c_char) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn DebugWindowState(code: i32) -> () {
+pub extern "C" fn DebugWindowState(code: i32) {
     log::trace!("DebugWindowState {code}");
 }

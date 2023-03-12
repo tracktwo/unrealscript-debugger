@@ -93,7 +93,7 @@ impl Connection for TcpConnection {
     }
 
     fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent> {
-        return &mut self.event_receiver;
+        &mut self.event_receiver
     }
 }
 

@@ -17,7 +17,7 @@ use tokio_util::codec::{Decoder, FramedRead};
 pub trait AsyncClient {
     type St: Unpin + Stream<Item = Result<Request, Error>>;
 
-    fn next_request<'a>(&'a mut self) -> Next<'a, Self::St>;
+    fn next_request(&mut self) -> Next<'_, Self::St>;
     fn respond(&mut self, response: Response) -> Result<(), Error>;
     fn send_event(&mut self, event: Event) -> Result<(), Error>;
 }
@@ -102,7 +102,7 @@ where
 {
     type St = FramedRead<R, AsyncClientDecoder>;
 
-    fn next_request<'a>(&'a mut self) -> Next<'a, Self::St> {
+    fn next_request(&mut self) -> Next<'_, Self::St> {
         self.input.next()
     }
 
@@ -137,6 +137,12 @@ where
     }
 }
 
+impl Default for AsyncClientDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AsyncClientDecoder {
     pub fn new() -> Self {
         Self {
@@ -151,8 +157,7 @@ impl AsyncClientDecoder {
     /// 'src' is the input buffer so far
     fn process_header(&mut self, src: &[u8]) -> Result<(), Error> {
         // The buffer should be a well-formed utf-8 string.
-        let str =
-            std::str::from_utf8(&src).or_else(|e| Err(Error::new(ErrorKind::InvalidData, e)))?;
+        let str = std::str::from_utf8(src).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
 
         assert!(str.ends_with("\r\n\r\n"));
         let spl: Vec<&str> = str.trim_end().split(':').collect();
@@ -186,11 +191,11 @@ impl AsyncClientDecoder {
         // the header bytes as we don't consume them until the entire frame is complete.
         assert!(src.len() >= self.body_start + self.body_len);
         let req = serde_json::from_slice(&src[self.body_start..self.body_start + self.body_len])
-            .or_else(|e| Err(Error::new(ErrorKind::InvalidData, e)));
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e));
         self.state = State::Header;
         self.body_start = 0;
         self.body_len = 0;
-        return req;
+        req
     }
 }
 

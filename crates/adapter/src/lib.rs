@@ -45,7 +45,7 @@ const UNREAL_THREAD_ID: i64 = 1;
 
 /// A representation of the client configuration options. These will impact how
 /// we send responses.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ClientConfig {
     // If true (the default and Unreal's native mode) the client expects lines to start at 1.
     // Otherwise they start at 0.
@@ -150,15 +150,11 @@ impl From<std::io::Error> for UnrealscriptAdapterError {
 
 impl<C: AsyncClient + Unpin> Drop for UnrealscriptAdapter<C> {
     fn drop(&mut self) {
-        match self.child.take() {
-            Some(mut child) => {
-                log::trace!("Killing child process.");
-                child.kill().unwrap_or_else(|e| {
-                    log::error!("Failed to kill child process: {e:?}");
-                    ()
-                })
-            }
-            None => (),
+        if let Some(mut child) = self.child.take() {
+            log::trace!("Killing child process.");
+            child.kill().unwrap_or_else(|e| {
+                log::error!("Failed to kill child process: {e:?}");
+            })
         }
     }
 }
@@ -173,7 +169,7 @@ where
         connection: Box<dyn Connection>,
         child: Option<Child>,
     ) -> UnrealscriptAdapter<C> {
-        let adapter = UnrealscriptAdapter {
+        UnrealscriptAdapter {
             class_map: BTreeMap::new(),
             connection,
             client,
@@ -181,13 +177,11 @@ where
             control: None,
             events: None,
             child,
-        };
-
-        adapter
+        }
     }
 
     /// Enqueue an event to the adapter queue.
-    fn queue_event(&mut self, evt: Event) -> () {
+    fn queue_event(&mut self, evt: Event) {
         executor::block_on(async { self.events.as_ref().unwrap().send(evt).await })
             .expect("Receiver cannot drop.");
     }
@@ -455,14 +449,14 @@ where
             // TODO: Remove the \\? prefix if present.
             let canonical = candidate
                 .canonicalize()
-                .or_else(|e| {
+                .map_err(|e| {
                     log::error!("Failed to canonicalize path {candidate:#?}");
-                    Err(e)
+                    e
                 })
                 .ok()?;
 
             let path = canonical.to_str();
-            if !path.is_some() {
+            if path.is_none() {
                 log::error!("Failed to stringize path {candidate:#?}");
                 return None;
             }
@@ -483,7 +477,7 @@ where
         if !self.class_map.contains_key(&canonical_name) {
             // This entry does not exist in our map, so try to locate the source file by searching
             // the source roots.
-            let mut split = canonical_name.split(".");
+            let mut split = canonical_name.split('.');
             let package = split.next().or_else(|| {
                 log::error!("Invalid class name {canonical_name}");
                 None
@@ -539,7 +533,7 @@ where
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
         // TODO send a 'stopdebugging' command, and shut down our event loop.
         self.connection.disconnect()?;
-        return Ok(ResponseBody::Disconnect);
+        Ok(ResponseBody::Disconnect)
     }
 
     /// Fetch the stack from the interface and send it to the client.
@@ -547,13 +541,11 @@ where
         &mut self,
         args: &StackTraceArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        let start_frame =
-            args.start_frame
-                .unwrap_or(0)
-                .try_into()
-                .or_else(|e: TryFromIntError| {
-                    Err(UnrealscriptAdapterError::LimitExceeded(e.to_string()))
-                })?;
+        let start_frame = args
+            .start_frame
+            .unwrap_or(0)
+            .try_into()
+            .map_err(|e: TryFromIntError| UnrealscriptAdapterError::LimitExceeded(e.to_string()))?;
 
         let levels = args
             .levels
@@ -707,8 +699,8 @@ where
         let (vars, invalidated) =
             self.connection.variables(
                 var.kind(),
-                var.frame().try_into().unwrap(),
-                var.variable().try_into().unwrap(),
+                var.frame(),
+                var.variable(),
                 args.start.unwrap_or(0).try_into().or(Err(
                     UnrealscriptAdapterError::LimitExceeded("Start index out of range".to_string()),
                 ))?,
@@ -815,28 +807,24 @@ where
     /// to send to the client.
     fn process_event(&mut self, evt: UnrealEvent) -> Option<Event> {
         match evt {
-            UnrealEvent::Log(msg) => {
-                return Some(Event {
-                    body: events::EventBody::Output(OutputEventBody {
-                        category: Some(OutputEventCategory::Stdout),
-                        output: msg,
-                        ..Default::default()
-                    }),
-                })
-            }
-            UnrealEvent::Stopped => {
-                return Some(Event {
-                    body: events::EventBody::Stopped(StoppedEventBody {
-                        reason: StoppedEventReason::Breakpoint,
-                        thread_id: Some(UNREAL_THREAD_ID),
-                        description: None,
-                        preserve_focus_hint: None,
-                        text: None,
-                        all_threads_stopped: None,
-                        hit_breakpoint_ids: None,
-                    }),
-                })
-            }
+            UnrealEvent::Log(msg) => Some(Event {
+                body: events::EventBody::Output(OutputEventBody {
+                    category: Some(OutputEventCategory::Stdout),
+                    output: msg,
+                    ..Default::default()
+                }),
+            }),
+            UnrealEvent::Stopped => Some(Event {
+                body: events::EventBody::Stopped(StoppedEventBody {
+                    reason: StoppedEventReason::Breakpoint,
+                    thread_id: Some(UNREAL_THREAD_ID),
+                    description: None,
+                    preserve_focus_hint: None,
+                    text: None,
+                    all_threads_stopped: None,
+                    hit_breakpoint_ids: None,
+                }),
+            }),
             UnrealEvent::Disconnect => {
                 // We've received a disconnect event from interface. This means
                 // the connection is shutting down. Send the shutdown control
@@ -848,9 +836,9 @@ where
                     .unwrap()
                     .send(ControlMessage::Shutdown)
                     .expect("Control channel cannot drop");
-                return None;
+                None
             }
-        };
+        }
     }
 }
 
@@ -1045,14 +1033,12 @@ mod tests {
     }
 
     fn make_test_adapter() -> UnrealscriptAdapter<AsyncClientImpl<Stdin, Stdout>> {
-        let adapter = UnrealscriptAdapter::new(
+        UnrealscriptAdapter::new(
             make_client(),
             ClientConfig::new(),
             Box::new(MockConnection {}),
             None,
-        );
-
-        adapter
+        )
     }
 
     #[test]
