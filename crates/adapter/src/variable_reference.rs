@@ -10,28 +10,32 @@
 //! request with the reference we previously assigned. These assignments are valid for as long as
 //! the debugger is stopped, so we don't need to maintain them across resumes.
 //!
-//! The VariableReference struct represents a way to identify a particular variable (or scope), and
+//! The [`VariableReference`] struct represents a way to identify a particular variable (or scope), and
 //! exposes ways to convert that to or from an i64 value for DAP to work with. The variable
 //! reference contains the following info:
 //!
-//! - The unreal watch kind (local var, global var, or user watch) - The frame index for this
-//! variable - An index for this particular variable within the frame and watch kind.
+//! - The unreal watch kind (local var, global var, or user watch)
+//! - The frame index for this variable
+//! - An index for this particular variable within the frame and watch kind.
 //!
 //! This information gets encoded into an i32 value according to the following scheme:
 //!
-//! <Bit 31> 0WWFFFFF FFFFVVVV VVVVVVVV VVVVVVVV <bit 0>
+//! `<Bit 31> 0WWFFFFF FFFFVVVV VVVVVVVV VVVVVVVV <bit 0>`
 //!
-//! - The topmost bit 31 is always 0.
-//! - 2 bits 29-30 are allocated to the watch kind.
-//! - 9 bits 20-28 are allocated to the frame index.
-//! - 20 bits 0-19 are allocated to the variable index.
+//! - The topmost bit 31 is always 0. This satisfies the requirement that the variable reference
+//! is always < 2^31.
+//! - 2 bits 29-30 are allocated to the watch kind. This allows 4 possible watch kinds, unreal
+//! uses 3.
+//! - 9 bits 20-28 are allocated to the frame index for a total of 512 possible frames.
+//! - 20 bits 0-19 are allocated to the variable index for a total of 1,048,576 variables per
+//!   frame. The number of variables includes all children of all variables within the frame
+//!   and of the given kind, recursively.
 //!
 //! This scheme puts some severe limits on the total number of frames and variables within
 //! a frame that can be supported, but it allows trivial mapping between variable references
 //! and the internal data structures that hold variable values without requiring a complex
-//! data structure to record that mapping. This scheme still allows for 512 stack frames and
-//! one million variables (including children) per frame and these limits are unlikely to be
-//! exceeded by Unreal.
+//! data structure to record that mapping. These numbers are limited but still large enough
+//! that it's unlikely that they'll be exceeded in game.
 //!
 //! Note: 0 is not a valid variable reference. Avoid this we map the watch kind so that the
 //! 00 bit pattern is not used.
@@ -40,6 +44,7 @@ use common::{FrameIndex, VariableIndex, WatchKind};
 
 use bit_field::BitField;
 
+/// A representation of a variable of a particular kind in a particular frame.
 #[derive(Debug)]
 pub struct VariableReference {
     kind: WatchKind,
@@ -116,12 +121,12 @@ impl VariableReference {
         self.kind
     }
 
-    /// Obtain the frame
+    /// Obtain the frame index
     pub fn frame(&self) -> FrameIndex {
         self.frame
     }
 
-    // Obtain the variable
+    /// Obtain the variable index
     pub fn variable(&self) -> VariableIndex {
         self.variable
     }

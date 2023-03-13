@@ -1,6 +1,9 @@
 //! TCP-based connection to Unreal
 
-use std::time::Duration;
+use std::{
+    io::{Error, ErrorKind},
+    time::Duration,
+};
 
 use common::{UnrealCommand, UnrealEvent, UnrealInterfaceMessage, UnrealResponse};
 use futures::SinkExt;
@@ -14,7 +17,7 @@ use tokio_serde::formats::Json;
 use tokio_stream::StreamExt;
 use tokio_util::codec::LengthDelimitedCodec;
 
-use super::{Connection, ConnectionError};
+use super::Connection;
 
 /// The number of connection attempts to make
 const CONNECT_ATTEMPTS: i32 = 10;
@@ -38,7 +41,7 @@ impl Drop for TcpConnection {
 
 impl TcpConnection {
     /// Connect to an unreal debugger adapter running at the given port number on the local computer.
-    pub async fn connect(port: u16) -> Result<TcpConnection, ConnectionError> {
+    pub async fn connect(port: u16) -> Result<TcpConnection, Error> {
         let mut tcp: Option<TcpStream> = None;
 
         // Try to connect, sleeping between attempts. This sleep is intended to give
@@ -57,7 +60,7 @@ impl TcpConnection {
         }
 
         // If we failed to connect we can't go any further.
-        let tcp = tcp.ok_or(ConnectionError::Disconnected)?;
+        let tcp = tcp.ok_or(Error::new(ErrorKind::NotConnected, "Failed to connect"))?;
 
         log::trace!("Connected to interface");
 
@@ -79,17 +82,15 @@ impl TcpConnection {
 }
 
 impl Connection for TcpConnection {
-    fn send_command(&mut self, command: UnrealCommand) -> Result<(), ConnectionError> {
-        match futures::executor::block_on(self.command_sender.send(command)) {
-            Ok(()) => Ok(()),
-            Err(_) => Err(ConnectionError::Disconnected),
-        }
+    fn send_command(&mut self, command: UnrealCommand) -> Result<(), Error> {
+        futures::executor::block_on(self.command_sender.send(command))
+            .map_err(|e| Error::new(ErrorKind::ConnectionReset, e))
     }
 
-    fn next_response(&mut self) -> Result<UnrealResponse, ConnectionError> {
+    fn next_response(&mut self) -> Result<UnrealResponse, Error> {
         log::trace!("Waiting for next response...");
         futures::executor::block_on(self.response_receiver.recv())
-            .ok_or(ConnectionError::Disconnected)
+            .ok_or({ Error::new(ErrorKind::ConnectionReset, "Error reading next response") })
     }
 
     fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent> {

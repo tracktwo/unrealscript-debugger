@@ -1,41 +1,23 @@
+//! Module for managing communications with the debugger interface.
+//!
+//! This defines the [`Connection`] trait for implementing the low-level communications
+//! channel between the debug adapter and interface, and a higher-level protocol
+//! on top of this for managing request/response transactions.
 pub mod tcp;
+
+use std::io::{Error, ErrorKind};
 
 use common::{
     Breakpoint, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent,
     UnrealResponse, Variable, VariableIndex, WatchKind,
 };
-use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
-
-/// An error sending or receiving data across the channel.
-#[derive(Debug, Error)]
-pub enum ConnectionError {
-    /// Timed out waiting for a response.
-    #[error("Timeout")]
-    Timeout,
-    /// The connection has been interrupted
-    #[error("Disconnected")]
-    Disconnected,
-    /// A serialization or deserialization error.
-    #[error("IO error: {0}")]
-    IoError(std::io::Error),
-
-    /// Received an unexpected response.
-    #[error("Protocol error")]
-    ProtocolError,
-}
-
-impl From<std::io::Error> for ConnectionError {
-    fn from(value: std::io::Error) -> Self {
-        ConnectionError::IoError(value)
-    }
-}
 
 macro_rules! expect_response {
     ($e:expr, $p:path) => {
         match $e {
             Ok($p(x)) => Ok(x),
-            Ok(_) => Err(ConnectionError::ProtocolError),
+            Ok(_) => Err(Error::new(ErrorKind::Other, "Protocol Error")),
             Err(e) => Err(e),
         }
     };
@@ -43,7 +25,7 @@ macro_rules! expect_response {
 
 /// A trait for representing a connection to an Unreal debug adapter.
 ///
-/// The connection to unreal is partially synchronous and partially asynchronous.
+/// The connection to Unreal is partially synchronous and partially asynchronous.
 /// This helps simplify the logic in both the adapter and the interface by limiting
 /// the amount of concurrency it needs to manage. The communications protocol between
 /// these two components is like a limited form of DAP itself, but since it's partially
@@ -57,8 +39,8 @@ macro_rules! expect_response {
 ///   commands from being sent at the same time.
 /// - next_response: To synchronously read a response from the interface to the adapter.
 ///   This blocks until a response has been received.
-/// - register_event_sender: Allows the adapter to provide a channel the connection can
-///   use to send events. This channel is asynchronous.
+/// - event_receiver: Returns a referene to a receiver that can be used to read events.
+///   This channel is asynchronous.
 ///
 /// The trait also provides a higher-level interface of synchronous functions to manage
 /// a transaction from the adapter to the interface, usually a command that results in
@@ -74,43 +56,64 @@ macro_rules! expect_response {
 /// likely to be an interrupted connection which will close the channel and unblock
 /// the caller anyway.
 pub trait Connection: Send {
-    fn send_command(&mut self, command: UnrealCommand) -> Result<(), ConnectionError>;
-    fn next_response(&mut self) -> Result<UnrealResponse, ConnectionError>;
+    /// Send the given command to the interface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if the command cannot be sent.
+    fn send_command(&mut self, command: UnrealCommand) -> Result<(), Error>;
+
+    /// Receive the next response from the interface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if the response cannot be read.
+    fn next_response(&mut self) -> Result<UnrealResponse, Error>;
+
+    /// Get a reference to the receiving end of a channel that will receive events
+    /// from the interface. These are received asynchronously.
     fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent>;
 
-    fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ConnectionError> {
+    /// Add a breakpoint.
+    fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, Error> {
         self.send_command(UnrealCommand::AddBreakpoint(bp))?;
         expect_response!(self.next_response(), UnrealResponse::BreakpointAdded)
     }
 
-    fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ConnectionError> {
+    /// Remove a breakpoint.
+    fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, Error> {
         self.send_command(UnrealCommand::RemoveBreakpoint(bp))?;
         expect_response!(self.next_response(), UnrealResponse::BreakpointRemoved)
     }
 
-    /// Send a stack trace request across the channel and read the resulting stack frames.
-    fn stack_trace(
-        &mut self,
-        req: StackTraceRequest,
-    ) -> Result<StackTraceResponse, ConnectionError> {
+    /// Request a full or partial stack trace.
+    fn stack_trace(&mut self, req: StackTraceRequest) -> Result<StackTraceResponse, Error> {
         self.send_command(UnrealCommand::StackTrace(req))?;
         expect_response!(self.next_response(), UnrealResponse::StackTrace)
     }
 
-    fn watch_count(
-        &mut self,
-        kind: WatchKind,
-        parent: VariableIndex,
-    ) -> Result<usize, ConnectionError> {
+    /// Request the number of children for the given variable kind and index.
+    ///
+    /// TODO: Why doesn't this take a frame (or variable reference?) do we never
+    /// call it for children, only scopes?
+    fn watch_count(&mut self, kind: WatchKind, parent: VariableIndex) -> Result<usize, Error> {
         self.send_command(UnrealCommand::WatchCount(kind, parent))?;
         expect_response!(self.next_response(), UnrealResponse::WatchCount)
     }
 
-    fn evaluate(&mut self, expr: &str) -> Result<Option<Variable>, ConnectionError> {
+    /// Evaluate the given string in the current debugger context.
+    fn evaluate(&mut self, expr: &str) -> Result<Option<Variable>, Error> {
         self.send_command(UnrealCommand::Evaluate(expr.to_string()))?;
         expect_response!(self.next_response(), UnrealResponse::Evaluate)
     }
 
+    /// Request a list of variables. This may be a list of top-level variables
+    /// or the list of children for a given variable.
+    ///
+    /// The request specifies the kind, frame, and variable index to identify
+    /// the variable and a start and count value to allow paginated responses.
+    ///
+    /// TODO: Why doesn't this take a variable reference?
     fn variables(
         &mut self,
         kind: WatchKind,
@@ -118,7 +121,7 @@ pub trait Connection: Send {
         variable: VariableIndex,
         start: usize,
         count: usize,
-    ) -> Result<(Vec<Variable>, bool), ConnectionError> {
+    ) -> Result<(Vec<Variable>, bool), Error> {
         self.send_command(UnrealCommand::Variables(
             kind, frame, variable, start, count,
         ))?;
@@ -128,37 +131,44 @@ pub trait Connection: Send {
         match self.next_response() {
             Ok(UnrealResponse::Variables(vars)) => Ok((vars, false)),
             Ok(UnrealResponse::DeferredVariables(vars)) => Ok((vars, true)),
-            Ok(_) => Err(ConnectionError::ProtocolError),
+            Ok(_) => Err(Error::new(ErrorKind::Other, "Protocol Error")),
             Err(e) => Err(e),
         }
     }
 
-    fn pause(&mut self) -> Result<(), ConnectionError> {
+    /// Request the debugger stop as soon as it can.
+    fn pause(&mut self) -> Result<(), Error> {
         self.send_command(UnrealCommand::Pause)?;
         Ok(())
     }
 
-    fn go(&mut self) -> Result<(), ConnectionError> {
+    /// Resume execution.
+    fn go(&mut self) -> Result<(), Error> {
         self.send_command(UnrealCommand::Go)?;
         Ok(())
     }
 
-    fn next(&mut self) -> Result<(), ConnectionError> {
+    /// Step over the next statement.
+    fn next(&mut self) -> Result<(), Error> {
         self.send_command(UnrealCommand::Next)?;
         Ok(())
     }
 
-    fn step_in(&mut self) -> Result<(), ConnectionError> {
+    /// Step into the next statement.
+    fn step_in(&mut self) -> Result<(), Error> {
         self.send_command(UnrealCommand::StepIn)?;
         Ok(())
     }
 
-    fn step_out(&mut self) -> Result<(), ConnectionError> {
+    /// Step out of the current function.
+    fn step_out(&mut self) -> Result<(), Error> {
         self.send_command(UnrealCommand::StepOut)?;
         Ok(())
     }
 
-    fn disconnect(&mut self) -> Result<(), ConnectionError> {
+    /// Disconnect from the interface, shutting down the debugger
+    /// session.
+    fn disconnect(&mut self) -> Result<(), Error> {
         self.send_command(UnrealCommand::Disconnect)?;
         Ok(())
     }

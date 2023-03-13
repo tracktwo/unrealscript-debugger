@@ -1,4 +1,16 @@
-use std::{collections::BTreeMap, num::TryFromIntError, path::Path, process::Child};
+//! A connected debug adapter.
+//!
+//! An [`UnrealscriptAdapter`] represents a debug adapter after successfully establishing a
+//! connection with the debugger interface. This is transformed from a
+//! [`crate::disconnected_adapter::DisconnectedAdapter`] which handles the first part of the DAP
+//! protocol.
+
+use std::{
+    collections::BTreeMap,
+    num::TryFromIntError,
+    path::{Component, Path},
+    process::Child,
+};
 
 use common::{
     Breakpoint, FrameIndex, StackTraceRequest, UnrealEvent, Variable, VariableIndex, WatchKind,
@@ -11,33 +23,29 @@ use dap::{
         ScopesArguments, SetBreakpointsArguments, StackTraceArguments, StepInArguments,
         StepOutArguments, VariablesArguments,
     },
-    responses::{ContinueResponse, ErrorMessage, EvaluateResponse, VariablesResponse},
+    responses::{ContinueResponse, EvaluateResponse, VariablesResponse},
     types::{
         InvalidatedAreas, OutputEventCategory, Scope, Source, StackFrame, StoppedEventReason,
         Thread,
     },
 };
 use futures::executor;
-use thiserror::Error;
 use tokio::{
     select,
     sync::{broadcast, mpsc},
 };
 
 use crate::{
-    async_client::AsyncClient,
-    client_config::ClientConfig,
-    comm::{Connection, ConnectionError},
-    util::{split_source, BadFilenameError},
-    variable_reference::VariableReference,
+    async_client::AsyncClient, client_config::ClientConfig, comm::Connection,
+    variable_reference::VariableReference, UnrealscriptAdapterError,
 };
 
 /// The thread ID to use for the unrealscript thread. The unreal debugger only supports one thread.
 const UNREAL_THREAD_ID: i64 = 1;
 
-/// Information about a class.
+// Information about a class.
 #[derive(Debug)]
-pub struct ClassInfo {
+struct ClassInfo {
     pub file_name: String,
     pub package_name: String,
     pub class_name: String,
@@ -82,71 +90,8 @@ pub struct UnrealscriptAdapter<C: AsyncClient + Unpin> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum ControlMessage {
+enum ControlMessage {
     Shutdown,
-}
-
-#[derive(Error, Debug)]
-pub enum UnrealscriptAdapterError {
-    #[error("Unhandled command: {0}")]
-    UnhandledCommand(String),
-
-    #[error("Invalid filename: {0}")]
-    InvalidFilename(String),
-
-    #[error("Not connected")]
-    NotConnected,
-
-    #[error("Communication error: {0}")]
-    CommunicationError(ConnectionError),
-
-    #[error("Limit exceeded: {0}")]
-    LimitExceeded(String),
-
-    #[error("Invalid program: {0}")]
-    InvalidProgram(String),
-
-    #[error("Watch error: {0}")]
-    WatchError(String),
-}
-
-impl UnrealscriptAdapterError {
-    /// Return a fixed id number for an error. This is used in DAP error
-    /// responses to uniquely identify messages.
-    fn id(&self) -> i64 {
-        match self {
-            UnrealscriptAdapterError::UnhandledCommand(_) => 1,
-            UnrealscriptAdapterError::InvalidFilename(_) => 2,
-            UnrealscriptAdapterError::NotConnected => 3,
-            UnrealscriptAdapterError::CommunicationError(_) => 4,
-            UnrealscriptAdapterError::LimitExceeded(_) => 5,
-            UnrealscriptAdapterError::InvalidProgram(_) => 6,
-            UnrealscriptAdapterError::WatchError(_) => 7,
-        }
-    }
-
-    /// Convet an UnrealScriptAdapterError to a DAP error message suitable
-    /// for use as a body in an error response.
-    pub fn to_error_message(&self) -> ErrorMessage {
-        ErrorMessage {
-            id: self.id(),
-            format: self.to_string(),
-            show_user: true,
-        }
-    }
-}
-
-impl From<ConnectionError> for UnrealscriptAdapterError {
-    /// Convert a ChannelError to an UnrealscriptAdapterError
-    fn from(value: ConnectionError) -> Self {
-        UnrealscriptAdapterError::CommunicationError(value)
-    }
-}
-
-impl From<std::io::Error> for UnrealscriptAdapterError {
-    fn from(_: std::io::Error) -> Self {
-        UnrealscriptAdapterError::NotConnected
-    }
 }
 
 impl<C: AsyncClient + Unpin> Drop for UnrealscriptAdapter<C> {
@@ -164,6 +109,7 @@ impl<C> UnrealscriptAdapter<C>
 where
     C: AsyncClient + Unpin,
 {
+    /// Construct a new connected adapter.
     pub fn new(
         client: C,
         config: ClientConfig,
@@ -185,10 +131,6 @@ where
     fn queue_event(&mut self, evt: Event) {
         executor::block_on(async { self.events.as_ref().unwrap().send(evt).await })
             .expect("Receiver cannot drop.");
-    }
-
-    pub fn client(&self) -> &C {
-        &self.client
     }
 
     /// Main loop of the adapter process. This monitors several different communications
@@ -844,8 +786,56 @@ where
     }
 }
 
+/// The filename does not conform to the Unreal path conventions for class naming.
+#[derive(Debug)]
+pub struct BadFilenameError;
+
+/// Process a Source entry to obtain information about a class.
+///
+/// For Unrealscript the details of a class can be determined from its source file.
+/// Given a Source entry with a full path to a source file we expect the path to always
+/// be of the form:
+///
+/// &lt;arbitrary leading directories&gt;\Src\PackageName\Classes\ClassName.uc
+///
+/// From a path of this form we can isolate the package and class names. This naming
+/// scheme is mandatory: the Unreal debugger only talks about package and class names,
+/// and the client only talks about source files. The Unrealscript compiler uses these
+/// same conventions.
+pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError> {
+    let path = Path::new(&path_str);
+    let mut iter = path.components().rev();
+
+    // Isolate the filename. This is the last component of the path and should have an extension to
+    // strip.
+    let component = iter.next().ok_or(BadFilenameError)?;
+    let class_name = match component {
+        Component::Normal(file_name) => Path::new(file_name).file_stem().ok_or(BadFilenameError),
+        _ => Err(BadFilenameError),
+    }?
+    .to_str()
+    .expect("Source path should be valid utf-8")
+    .to_owned();
+
+    // Skip the parent
+    iter.next();
+
+    // the package name should be the next component.
+    let component = iter.next().ok_or(BadFilenameError)?;
+    let package_name = match component {
+        Component::Normal(file_name) => Ok(file_name),
+        _ => Err(BadFilenameError),
+    }?
+    .to_str()
+    .expect("Source path should be vaild utf-8")
+    .to_owned();
+    Ok((package_name, class_name))
+}
+
 #[cfg(test)]
 mod tests {
+
+    use std::io::Error;
 
     use common::{UnrealCommand, UnrealResponse};
     use dap::types::{Source, SourceBreakpoint};
@@ -874,11 +864,11 @@ mod tests {
     // trait methods: they all panic. It reimplements the high-level API to return mocked
     // values instead.
     impl Connection for MockConnection {
-        fn send_command(&mut self, _command: UnrealCommand) -> Result<(), ConnectionError> {
+        fn send_command(&mut self, _command: UnrealCommand) -> Result<(), Error> {
             unreachable!();
         }
 
-        fn next_response(&mut self) -> Result<UnrealResponse, ConnectionError> {
+        fn next_response(&mut self) -> Result<UnrealResponse, Error> {
             unreachable!()
         }
 
@@ -886,18 +876,18 @@ mod tests {
             unreachable!()
         }
 
-        fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ConnectionError> {
+        fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, Error> {
             Ok(bp)
         }
 
-        fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, ConnectionError> {
+        fn remove_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, Error> {
             Ok(bp)
         }
 
         fn stack_trace(
             &mut self,
             _req: StackTraceRequest,
-        ) -> Result<common::StackTraceResponse, ConnectionError> {
+        ) -> Result<common::StackTraceResponse, Error> {
             unreachable!()
         }
 
@@ -905,11 +895,11 @@ mod tests {
             &mut self,
             _kind: WatchKind,
             _parent: VariableIndex,
-        ) -> Result<usize, ConnectionError> {
+        ) -> Result<usize, Error> {
             unreachable!()
         }
 
-        fn evaluate(&mut self, _expr: &str) -> Result<Option<Variable>, ConnectionError> {
+        fn evaluate(&mut self, _expr: &str) -> Result<Option<Variable>, Error> {
             unreachable!()
         }
 
@@ -920,31 +910,31 @@ mod tests {
             _variable: VariableIndex,
             _start: usize,
             _count: usize,
-        ) -> Result<(Vec<Variable>, bool), ConnectionError> {
+        ) -> Result<(Vec<Variable>, bool), Error> {
             unreachable!()
         }
 
-        fn pause(&mut self) -> Result<(), ConnectionError> {
+        fn pause(&mut self) -> Result<(), Error> {
             Ok(())
         }
 
-        fn go(&mut self) -> Result<(), ConnectionError> {
+        fn go(&mut self) -> Result<(), Error> {
             Ok(())
         }
 
-        fn next(&mut self) -> Result<(), ConnectionError> {
+        fn next(&mut self) -> Result<(), Error> {
             Ok(())
         }
 
-        fn step_in(&mut self) -> Result<(), ConnectionError> {
+        fn step_in(&mut self) -> Result<(), Error> {
             Ok(())
         }
 
-        fn step_out(&mut self) -> Result<(), ConnectionError> {
+        fn step_out(&mut self) -> Result<(), Error> {
             Ok(())
         }
 
-        fn disconnect(&mut self) -> Result<(), ConnectionError> {
+        fn disconnect(&mut self) -> Result<(), Error> {
             Ok(())
         }
     }
@@ -956,6 +946,31 @@ mod tests {
             Box::new(MockConnection {}),
             None,
         )
+    }
+
+    #[test]
+    fn can_split_source() {
+        let (package, class) = split_source(GOOD_PATH).unwrap();
+        assert_eq!(package, "MyPackage");
+        assert_eq!(class, "SomeClass");
+    }
+
+    #[test]
+    fn split_source_bad_classname() {
+        let path = if cfg!(windows) {
+            "C:\\MyMod\\BadClass.uc"
+        } else {
+            "/MyMod/BadClass.uc"
+        };
+        let info = split_source(path);
+        assert!(matches!(info, Err(BadFilenameError)));
+    }
+
+    #[test]
+    fn split_source_forward_slashes() {
+        let (package, class) = split_source(GOOD_PATH).unwrap();
+        assert_eq!(package, "MyPackage");
+        assert_eq!(class, "SomeClass");
     }
 
     #[test]

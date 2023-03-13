@@ -1,8 +1,8 @@
 //! A builder pattern for managing a debugging session.
 //!
-//! This module provides the 'DisconnectedAdapter' which manages the first part
+//! This module provides the ['DisconnectedAdapter'] which manages the first part
 //! of a debugging session before we launch/attach to the debuggee. Once communications
-//! with the debuggee are established this transforms to a 'ConnectedAdapter' to
+//! with the debuggee are established this transforms to a ['ConnectedAdapter'] to
 //! manage the rest of the debugging session.
 
 use std::process::Child;
@@ -19,10 +19,8 @@ use serde_json::Value;
 use tokio::select;
 
 use crate::{
-    async_client::AsyncClient,
-    client_config::ClientConfig,
-    comm::tcp::TcpConnection,
-    connected_adapter::{UnrealscriptAdapter, UnrealscriptAdapterError},
+    async_client::AsyncClient, client_config::ClientConfig, comm::tcp::TcpConnection,
+    connected_adapter::UnrealscriptAdapter, UnrealscriptAdapterError,
 };
 
 /// A representation of a disconnected adapter. This manages the portion of the
@@ -202,9 +200,8 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         auto_debug: bool,
     ) -> Result<Child, UnrealscriptAdapterError> {
         // Find the program to run
-        let program = Self::extract_program(&args.other).ok_or(
-            UnrealscriptAdapterError::InvalidProgram("No program provided".to_string()),
-        )?;
+        let program =
+            Self::extract_program(&args.other).ok_or(UnrealscriptAdapterError::NoProgram)?;
 
         let program_args = Self::extract_args(&args.other);
 
