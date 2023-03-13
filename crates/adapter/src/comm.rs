@@ -92,10 +92,14 @@ pub trait Connection: Send {
         expect_response!(self.next_response(), UnrealResponse::StackTrace)
     }
 
-    /// Request the number of children for the given variable kind and index.
+    /// Request the number of children of the variable (or scope) of the given
+    /// kind.
     ///
-    /// TODO: Why doesn't this take a frame (or variable reference?) do we never
-    /// call it for children, only scopes?
+    /// The total number of variables of a given kind can be obtained by using the
+    /// SCOPE pseudo-variable index. For any other index it will request the number of
+    /// children of that variable, which may be zero.
+    ///
+    /// This can only obtain child counts for the current frame.
     fn watch_count(&mut self, kind: WatchKind, parent: VariableIndex) -> Result<usize, Error> {
         self.send_command(UnrealCommand::WatchCount(kind, parent))?;
         expect_response!(self.next_response(), UnrealResponse::WatchCount)
@@ -112,8 +116,6 @@ pub trait Connection: Send {
     ///
     /// The request specifies the kind, frame, and variable index to identify
     /// the variable and a start and count value to allow paginated responses.
-    ///
-    /// TODO: Why doesn't this take a variable reference?
     fn variables(
         &mut self,
         kind: WatchKind,
