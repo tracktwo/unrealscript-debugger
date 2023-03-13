@@ -5,6 +5,13 @@
 //! the Unrealscript Debugger Interface, which runs in the Unreal process.
 #![warn(missing_docs)]
 
+// TODO:
+//  - Add a version check between the adapter and interface and use that to send
+//  a message to the client to indicate a plugin update requires a reinstall of
+//  the interface.
+//
+//  - Figure out why non-top stack hovers aren't working.
+
 use dap::responses::ErrorMessage;
 use thiserror::Error;
 pub mod async_client;
@@ -16,12 +23,15 @@ pub mod variable_reference;
 
 /// An error representing failure modes of the adapter. These errors are transmitted
 /// to the client and may be displayed to the user, so they will include several
-/// specific error cases to give better diagnostics to the user.
+/// specific error cases to give better diagnostics about particular failures
+/// especially if they are related to configuration, or indicate some kind of
+/// unexpected state communicating with DAP for a particular editor that might be
+/// a bug in the adapter.
 #[derive(Error, Debug)]
 pub enum UnrealscriptAdapterError {
     /// We received a DAP command that is not understood, or is inappropriate for
     /// the current adapter state (e.g. we can't process a 'setBreakpoints' command
-    /// until after launching or attaching to the debuggee.
+    /// until after launching or attaching to the debuggee).
     #[error("Unhandled command: {0}")]
     UnhandledCommand(String),
 
