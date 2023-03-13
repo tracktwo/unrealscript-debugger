@@ -108,4 +108,3 @@ async fn frame_2() {
         o => panic!("Expected a variables response: {o:#?}"),
     }
 }
-// TODO Test source roots.

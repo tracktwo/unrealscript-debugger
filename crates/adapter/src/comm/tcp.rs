@@ -89,8 +89,10 @@ impl Connection for TcpConnection {
 
     fn next_response(&mut self) -> Result<UnrealResponse, Error> {
         log::trace!("Waiting for next response...");
-        futures::executor::block_on(self.response_receiver.recv())
-            .ok_or({ Error::new(ErrorKind::ConnectionReset, "Error reading next response") })
+        futures::executor::block_on(self.response_receiver.recv()).ok_or(Error::new(
+            ErrorKind::ConnectionReset,
+            "Error reading next response",
+        ))
     }
 
     fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent> {

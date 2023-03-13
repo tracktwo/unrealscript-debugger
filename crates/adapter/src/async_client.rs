@@ -286,7 +286,12 @@ mod tests {
 
     use std::io::Cursor;
 
-    use dap::requests::Command;
+    use dap::{
+        events::{EventBody, OutputEventBody},
+        requests::Command,
+        responses::ResponseBody,
+        types::{OutputEventCategory, Scope},
+    };
 
     use super::*;
 
@@ -336,5 +341,124 @@ mod tests {
             Some(Ok(req)) => assert!(matches!(req.command, Command::Initialize(_))),
             other => panic!("Expected valid request but got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn bad_header_kind() {
+        let str = "Misunderstood: 20\r\n\r\n";
+        let input = Cursor::new(str);
+        let output: Vec<u8> = vec![];
+        let mut client = AsyncClientImpl::new(input, output);
+        match client.next_request().await {
+            Some(Err(e)) => assert_eq!(e.kind(), ErrorKind::InvalidData),
+            _ => panic!("Expected a bad header error response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bad_header_line() {
+        let str = "Not a valid header\r\n\r\n";
+        let input = Cursor::new(str);
+        let output: Vec<u8> = vec![];
+        let mut client = AsyncClientImpl::new(input, output);
+        match client.next_request().await {
+            Some(Err(e)) => assert_eq!(e.kind(), ErrorKind::InvalidData),
+            _ => panic!("Expected a bad header error response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bad_length() {
+        let str = "Content-Length: nine thousand\r\n\r\n";
+        let input = Cursor::new(str);
+        let output: Vec<u8> = vec![];
+        let mut client = AsyncClientImpl::new(input, output);
+        match client.next_request().await {
+            Some(Err(e)) => assert_eq!(e.kind(), ErrorKind::InvalidData),
+            _ => panic!("Expected a bad header error response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn not_json() {
+        let str = "Content-Length: 11\r\n\r\nHello World";
+        let input = Cursor::new(str);
+        let output: Vec<u8> = vec![];
+        let mut client = AsyncClientImpl::new(input, output);
+        match client.next_request().await {
+            Some(Err(e)) => assert_eq!(e.kind(), ErrorKind::InvalidData),
+            _ => panic!("Expected a bad body error response"),
+        }
+    }
+
+    #[test]
+    fn sending_raw_message() {
+        let str = "A message";
+        let input = Cursor::new(str);
+        let mut buf: Vec<u8> = vec![];
+        let output = Cursor::new(&mut buf);
+        let mut client = AsyncClientImpl::new(input, output);
+        client.send_message(str.as_bytes()).unwrap();
+        let out = std::str::from_utf8(&buf).unwrap();
+        assert_eq!(format!("Content-Length: 9\r\n\r\n{str}"), out);
+    }
+
+    #[test]
+    fn sending_response() {
+        let str = "A message";
+        let input = Cursor::new(str);
+        let mut buf: Vec<u8> = vec![];
+        let output = Cursor::new(&mut buf);
+        let mut client = AsyncClientImpl::new(input, output);
+        let response = Response {
+            command: "scopes",
+            request_seq: 1,
+            success: true,
+            message: None,
+            body: Some(ResponseBody::Scopes(dap::responses::ScopesResponse {
+                scopes: vec![Scope {
+                    name: "Globals".to_string(),
+                    column: None,
+                    end_column: None,
+                    line: None,
+                    end_line: None,
+                    expensive: false,
+                    presentation_hint: None,
+                    variables_reference: 1,
+                    named_variables: None,
+                    indexed_variables: None,
+                    source: None,
+                }],
+            })),
+        };
+        client.respond(response).unwrap();
+        let out = std::str::from_utf8(&buf).unwrap();
+        assert_eq!(out,
+        "Content-Length: 299\r\n\r\n{\"type\":\"response\",\"seq\":1,\"request_seq\":1,\"success\":true,\"command\":\"scopes\",\"body\":{\"scopes\":[{\"name\":\"Globals\",\"presentationHint\":null,\"variablesReference\":1,\"namedVariables\":null,\"indexedVariables\":null,\"expensive\":false,\"source\":null,\"line\":null,\"column\":null,\"endLine\":null,\"endColumn\":null}]}}");
+    }
+
+    #[test]
+    fn sending_event() {
+        let str = "A message";
+        let input = Cursor::new(str);
+        let mut buf: Vec<u8> = vec![];
+        let output = Cursor::new(&mut buf);
+        let mut client = AsyncClientImpl::new(input, output);
+        let event = Event {
+            body: EventBody::Output(OutputEventBody {
+                category: Some(OutputEventCategory::Stdout),
+                output: "A log line".to_string(),
+                group: None,
+                variables_reference: None,
+                source: None,
+                line: None,
+                column: None,
+                data: None,
+            }),
+        };
+        client.send_event(event).unwrap();
+        let out = std::str::from_utf8(&buf).unwrap();
+        assert_eq!(out,
+        "Content-Length: 183\r\n\r\n{\"type\":\"event\",\"seq\":1,\"event\":\"output\",\"body\":{\"category\":\"stdout\",\"output\":\"A log line\",\"group\":null,\"variablesReference\":null,\"source\":null,\"line\":null,\"column\":null,\"data\":null}}");
     }
 }
