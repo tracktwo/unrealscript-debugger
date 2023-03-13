@@ -578,17 +578,17 @@ where
         Ok(ResponseBody::Scopes(responses::ScopesResponse {
             scopes: vec![
                 Scope {
-                    name: "Locals".to_string(),
-                    variables_reference: locals_ref.to_int(),
-                    named_variables: local_vars,
-                    expensive: args.frame_id != 0,
+                    name: "self".to_string(),
+                    variables_reference: globals_ref.to_int(),
+                    named_variables: global_vars,
+                    expensive: false,
                     ..Default::default()
                 },
                 Scope {
-                    name: "Globals".to_string(),
-                    variables_reference: globals_ref.to_int(),
-                    named_variables: global_vars,
-                    expensive: args.frame_id != 0,
+                    name: "locals".to_string(),
+                    variables_reference: locals_ref.to_int(),
+                    named_variables: local_vars,
+                    expensive: false,
                     ..Default::default()
                 },
             ],
