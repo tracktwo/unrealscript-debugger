@@ -1,52 +1,28 @@
 //! Integration tests for communications between the adapter and interface: logging.
 
-use adapter::async_client::AsyncClient;
-use dap::{events::EventBody, prelude::Event, requests::Request, types::OutputEventCategory};
-use futures::{executor, StreamExt};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio_stream::wrappers::ReceiverStream;
+use common::{InitializeResponse, UnrealCommand, UnrealResponse, Version};
+use dap::{events::EventBody, types::OutputEventCategory};
+use futures::StreamExt;
 mod fixture;
-
-struct LogClient {
-    etx: Sender<Event>,
-    rstream: ReceiverStream<Result<Request, std::io::Error>>,
-}
-
-impl LogClient {
-    pub fn new(etx: Sender<Event>, rrx: Receiver<Result<Request, std::io::Error>>) -> Self {
-        LogClient {
-            etx,
-            rstream: ReceiverStream::new(rrx),
-        }
-    }
-}
-
-impl AsyncClient for LogClient {
-    type St = ReceiverStream<Result<Request, std::io::Error>>;
-
-    fn next_request(&mut self) -> futures::stream::Next<'_, Self::St> {
-        self.rstream.next()
-    }
-
-    fn respond(&mut self, _: dap::responses::Response) -> Result<(), std::io::Error> {
-        Ok(())
-    }
-
-    fn send_event(&mut self, event: dap::prelude::Event) -> Result<(), std::io::Error> {
-        executor::block_on(async { self.etx.send(event).await.unwrap() });
-        Ok(())
-    }
-}
 
 /// Test sending a log line from the interface to the adapter.
 #[tokio::test(flavor = "multi_thread")]
 async fn simple_log() {
-    let (etx, mut erx) = channel(1);
-
-    let (_rtx, rrx) = channel(1);
-    let (mut adapter, mut dbg, comm) = fixture::setup_with_client(LogClient::new(etx, rrx)).await;
+    let (client, mut erx, _rtx) = fixture::make_test_client();
+    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client).await;
 
     tokio::task::spawn(async move {
+        // Fetch the initialized command and return a response.
+        let command = comm.next().await.unwrap().unwrap();
+        assert!(matches!(command, UnrealCommand::Initialize(_)));
+        dbg.send_response(UnrealResponse::Initialize(InitializeResponse {
+            version: Version {
+                major: 0,
+                minor: 0,
+                patch: 0,
+            },
+        }))
+        .unwrap();
         // Send a log event
         dbg.add_line_to_log("Log line!\0".as_ptr() as *const i8);
         // Close the tcp connection. Required so the adapter loop can detect this and stop.
@@ -76,5 +52,12 @@ async fn simple_log() {
         assert!(matches!(evt.body, EventBody::Terminated(_)));
     });
 
-    adapter.process_messages().await.unwrap();
+    adapter
+        .process_messages(Version {
+            major: 0,
+            minor: 0,
+            patch: 0,
+        })
+        .await
+        .unwrap();
 }

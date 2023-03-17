@@ -2,7 +2,15 @@ use adapter::{
     async_client::AsyncClientImpl,
     disconnected_adapter::{DisconnectedAdapter, DisconnectedAdapterError},
 };
+use common::Version;
 use flexi_logger::{Duplicate, FileSpec, Logger};
+use pkg_version::{pkg_version_major, pkg_version_minor, pkg_version_patch};
+
+const ADAPTER_VERSION: Version = Version {
+    major: pkg_version_major!(),
+    minor: pkg_version_minor!(),
+    patch: pkg_version_patch!(),
+};
 
 #[tokio::main]
 async fn main() {
@@ -26,7 +34,7 @@ async fn main() {
         match adapter.connect().await {
             Ok(mut connected) => {
                 log::info!("Connection established!");
-                match connected.process_messages().await {
+                match connected.process_messages(ADAPTER_VERSION).await {
                     Ok(()) => {
                         log::info!("Debugger session ended.");
                         break 0;

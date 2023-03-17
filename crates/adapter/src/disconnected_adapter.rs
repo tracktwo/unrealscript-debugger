@@ -70,6 +70,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                 supports_variable_type: false,
                 supports_invalidated_event: false,
                 source_roots: vec![],
+                enable_stack_hack: false,
             },
         }
     }
@@ -125,6 +126,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
             supports_variable_type: args.supports_variable_type.unwrap_or(false),
             supports_invalidated_event: args.supports_invalidated_event.unwrap_or(false),
             source_roots: vec![],
+            enable_stack_hack: false,
         };
 
         // Send the response.
@@ -170,6 +172,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         log::info!("Attach request");
         let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
         self.config.source_roots = Self::extract_source_roots(&args.other).unwrap_or_default();
+        self.config.enable_stack_hack = Self::extract_stack_hack(&args.other).unwrap_or(true);
         match self.connect_to_interface(port).await {
             Ok(connection) => {
                 // Connection succeeded: Respond with a success response and return
@@ -274,6 +277,8 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                                 .respond(Response::make_success(req, ResponseBody::Launch))?;
                             self.config.source_roots =
                                 Self::extract_source_roots(&args.other).unwrap_or_default();
+                            self.config.enable_stack_hack =
+                                Self::extract_stack_hack(&args.other).unwrap_or(true);
 
                             Ok(UnrealscriptAdapter::new(
                                 self.client,
@@ -316,6 +321,11 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     /// Extract the program from launch arguments.
     fn extract_program(value: &Option<Value>) -> Option<&str> {
         value.as_ref()?["program"].as_str()
+    }
+
+    /// Extract the enableStackHack value from launch/attach arguments.
+    fn extract_stack_hack(value: &Option<Value>) -> Option<bool> {
+        value.as_ref()?["enableStackHack"].as_bool()
     }
 
     /// Extract the argument list from launch arguments.

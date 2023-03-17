@@ -5,13 +5,18 @@ use adapter::{
     connected_adapter::UnrealscriptAdapter,
 };
 use common::{UnrealCommand, UnrealInterfaceMessage};
-use futures::{stream::SplitStream, SinkExt, StreamExt};
+use dap::{prelude::Event, requests::Request};
+use futures::{executor, stream::SplitStream, SinkExt, StreamExt};
 use interface::debugger::Debugger;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::broadcast,
+    sync::{
+        broadcast,
+        mpsc::{channel, Receiver, Sender},
+    },
 };
 use tokio_serde::formats::Json;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::LengthDelimitedCodec;
 
 pub type TcpFrame = tokio_serde::Framed<
@@ -46,6 +51,7 @@ pub async fn setup_with_client<C: AsyncClient + Unpin>(
             supports_variable_type: true,
             supports_invalidated_event: false,
             source_roots: vec![],
+            enable_stack_hack: false,
         },
         Box::new(TcpConnection::connect(port).await.unwrap()),
         None,
@@ -91,4 +97,49 @@ pub async fn setup() -> (
         tokio::io::stdout(),
     ))
     .await
+}
+
+pub struct TestClient {
+    etx: Sender<Event>,
+    rstream: ReceiverStream<Result<Request, std::io::Error>>,
+}
+
+impl TestClient {
+    pub fn new(etx: Sender<Event>, rrx: Receiver<Result<Request, std::io::Error>>) -> Self {
+        TestClient {
+            etx,
+            rstream: ReceiverStream::new(rrx),
+        }
+    }
+}
+
+impl AsyncClient for TestClient {
+    type St = ReceiverStream<Result<Request, std::io::Error>>;
+
+    fn next_request(&mut self) -> futures::stream::Next<'_, Self::St> {
+        self.rstream.next()
+    }
+
+    fn respond(&mut self, _: dap::responses::Response) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
+    fn send_event(&mut self, event: dap::prelude::Event) -> Result<(), std::io::Error> {
+        executor::block_on(async { self.etx.send(event).await.unwrap() });
+        Ok(())
+    }
+}
+
+/// Create a test client and return it, a channel to receive events from it, and a channel to send
+/// requests to it.
+#[allow(dead_code)]
+pub fn make_test_client() -> (
+    TestClient,
+    Receiver<Event>,
+    Sender<Result<Request, std::io::Error>>,
+) {
+    let (etx, erx) = channel(1);
+    let (rtx, rrx) = channel(1);
+    let client = TestClient::new(etx, rrx);
+    (client, erx, rtx)
 }

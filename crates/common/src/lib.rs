@@ -155,6 +155,43 @@ impl Breakpoint {
     }
 }
 
+/// Representation of a version number
+#[derive(Serialize, Deserialize, Debug, Ord, Eq, PartialEq, PartialOrd, Clone)]
+pub struct Version {
+    /// Major version
+    pub major: u32,
+    /// Minor version
+    pub minor: u32,
+    /// Patch version
+    pub patch: u32,
+}
+
+/// An initialization message from the adapter to the interface, sent when the
+/// adapter first connects to the interface. This will result in a [`InitializeResponse`].
+///
+/// This request and the corresponding response include version information for
+/// the adapter and interface, respectively. This can be used to tell the user
+/// that the interface needs updating.
+///
+/// The handshake can be versioned by introducing new message types to be sent
+/// after the initialize pair if both the adapter and interface support them.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct InitializeRequest {
+    /// The version of the adapter.
+    pub version: Version,
+    /// If true, enable the experimental code for fetching line numbers for
+    /// all callstack entries.
+    pub enable_stack_hack: bool,
+}
+
+/// An initialization response from the interface to the adapter. Tells the
+/// adapter about the version of the interface.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct InitializeResponse {
+    /// The version of the interface.
+    pub version: Version,
+}
+
 /// A message representing a request from the adapter to the interface to
 /// list stack frame entries. Will result in a [`StackTraceResponse`].
 #[derive(Serialize, Deserialize, Debug)]
@@ -235,6 +272,8 @@ pub struct Variable {
 /// Commands that can be sent from the adapter to the debugger interface.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UnrealCommand {
+    /// Perform the initialization handshake with the interface.
+    Initialize(InitializeRequest),
     /// Set a breakpoint
     AddBreakpoint(Breakpoint),
     /// Remove a breakpoint
@@ -274,6 +313,8 @@ pub enum UnrealCommand {
 /// in a well-defined order in response to a command from the adapter.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum UnrealResponse {
+    /// The response portion of the initialization handshake
+    Initialize(InitializeResponse),
     /// A breakpoint has been added.
     BreakpointAdded(Breakpoint),
     /// A breakpoint has been removed.

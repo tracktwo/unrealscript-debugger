@@ -20,6 +20,7 @@ bytes = "1.4"
 dap = { path = "../../../dap-rs" }
 common.workspace = true
 interface.workspace = true
+pkg-version = "1.0.0"
 
 
 [[bin]]

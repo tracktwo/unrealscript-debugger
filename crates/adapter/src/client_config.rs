@@ -22,6 +22,9 @@ pub struct ClientConfig {
     /// An ordered list of directories in which we may find source files. Used to locate
     /// the source file for a particular package and class.
     pub source_roots: Vec<String>,
+
+    /// Enable scraping line numbers out of Unreal for all stack frames. Experimental.
+    pub enable_stack_hack: bool,
 }
 
 impl ClientConfig {
@@ -32,6 +35,7 @@ impl ClientConfig {
             supports_variable_type: false,
             supports_invalidated_event: false,
             source_roots: vec![],
+            enable_stack_hack: false,
         }
     }
 }

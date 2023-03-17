@@ -12,9 +12,10 @@
 
 use std::sync::{Condvar, Mutex};
 
+use common::Version;
 use debugger::Debugger;
 use flexi_logger::LoggerHandle;
-
+use pkg_version::{pkg_version_major, pkg_version_minor, pkg_version_patch};
 pub mod api;
 pub mod debugger;
 pub mod lifetime;
@@ -24,3 +25,8 @@ pub mod stackhack;
 static DEBUGGER: Mutex<Option<Debugger>> = Mutex::new(None);
 static LOGGER: Mutex<Option<LoggerHandle>> = Mutex::new(None);
 static VARIABLE_REQUST_CONDVAR: Condvar = Condvar::new();
+static INTERFACE_VERSION: Version = Version {
+    major: pkg_version_major!(),
+    minor: pkg_version_minor!(),
+    patch: pkg_version_patch!(),
+};

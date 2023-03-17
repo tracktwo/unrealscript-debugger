@@ -12,12 +12,13 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
 use common::{
-    Breakpoint, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent,
-    UnrealInterfaceMessage, UnrealResponse, Variable, VariableIndex,
+    Breakpoint, FrameIndex, InitializeResponse, StackTraceRequest, StackTraceResponse,
+    UnrealCommand, UnrealEvent, UnrealInterfaceMessage, UnrealResponse, Variable, VariableIndex,
 };
 use common::{Frame, WatchKind};
 
-use crate::VARIABLE_REQUST_CONDVAR;
+use crate::stackhack::{StackHack, DEFAULT_MODEL};
+use crate::{INTERFACE_VERSION, VARIABLE_REQUST_CONDVAR};
 
 const MAGIC_DISCONNECT_STRING: &str = "Log: Detaching UnrealScript Debugger (currently detached)";
 
@@ -51,6 +52,8 @@ pub struct Debugger {
     // to wait for this to complete before taking other actions, especially one that
     // could result in more variable requests.
     pending_variable_request: Option<PendingVariableRequest>,
+
+    stack_hack: Option<StackHack>,
 }
 
 #[derive(Debug)]
@@ -167,6 +170,7 @@ impl Debugger {
             current_line: 0,
             current_frame: FrameIndex::TOP_FRAME,
             pending_variable_request: None,
+            stack_hack: None,
         }
     }
 
@@ -192,6 +196,34 @@ impl Debugger {
         command: UnrealCommand,
     ) -> Result<CommandAction, DebuggerError> {
         match command {
+            UnrealCommand::Initialize(init) => {
+                log::info!(
+                    "Connected to adapter version {}.{}.{}; interface version {}.{}.{}",
+                    init.version.major,
+                    init.version.minor,
+                    init.version.patch,
+                    INTERFACE_VERSION.major,
+                    INTERFACE_VERSION.minor,
+                    INTERFACE_VERSION.patch
+                );
+                // We don't need to use the version number for anything at the moment, just the
+                // stack hack flag.
+                if init.enable_stack_hack {
+                    log::info!("Enabling stack hack");
+                    unsafe {
+                        self.stack_hack = StackHack::create(DEFAULT_MODEL);
+                    }
+
+                    if self.stack_hack.is_none() {
+                        log::error!("Failed to initialize stack hack instance.");
+                    }
+                }
+                self.send_response(UnrealResponse::Initialize(InitializeResponse {
+                    version: INTERFACE_VERSION.clone(),
+                }))?;
+                // This doesn't require any action by Unreal
+                Ok(CommandAction::Nothing)
+            }
             UnrealCommand::AddBreakpoint(bp) => {
                 let str = format!("addbreakpoint {} {}", bp.qualified_name, bp.line);
                 log::trace!("handle_command: {str}");

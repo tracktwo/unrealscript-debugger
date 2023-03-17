@@ -6,6 +6,7 @@
 //! protocol.
 
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     num::TryFromIntError,
     path::{Component, Path},
@@ -13,7 +14,8 @@ use std::{
 };
 
 use common::{
-    Breakpoint, FrameIndex, StackTraceRequest, UnrealEvent, Variable, VariableIndex, WatchKind,
+    Breakpoint, FrameIndex, StackTraceRequest, UnrealEvent, Variable, VariableIndex, Version,
+    WatchKind,
 };
 use dap::{
     events::{EventBody, InvalidatedEventBody, OutputEventBody, StoppedEventBody},
@@ -29,11 +31,7 @@ use dap::{
         Thread,
     },
 };
-use futures::executor;
-use tokio::{
-    select,
-    sync::{broadcast, mpsc},
-};
+use tokio::{select, sync::broadcast};
 
 use crate::{
     async_client::AsyncClient, client_config::ClientConfig, comm::Connection,
@@ -85,7 +83,6 @@ pub struct UnrealscriptAdapter<C: AsyncClient + Unpin> {
     connection: Box<dyn Connection>,
     class_map: BTreeMap<String, ClassInfo>,
     control: Option<broadcast::Sender<ControlMessage>>,
-    events: Option<mpsc::Sender<Event>>,
     child: Option<Child>,
 }
 
@@ -122,15 +119,8 @@ where
             client,
             config,
             control: None,
-            events: None,
             child,
         }
-    }
-
-    /// Enqueue an event to the adapter queue.
-    fn queue_event(&mut self, evt: Event) {
-        executor::block_on(async { self.events.as_ref().unwrap().send(evt).await })
-            .expect("Receiver cannot drop.");
     }
 
     /// Main loop of the adapter process. This monitors several different communications
@@ -147,22 +137,43 @@ where
     ///
     /// This function returns an io error only in unrecoverable scenarios,
     /// typically if the client or interface communication channels have closed.
-    pub async fn process_messages(&mut self) -> Result<(), std::io::Error> {
+    pub async fn process_messages(&mut self, version: Version) -> Result<(), std::io::Error> {
         // Set up the control channel
         let (ctx, mut crx) = broadcast::channel(10);
         self.control = Some(ctx);
 
-        // Set up the event channel for DAP events. The adapter needs to generate DAP
-        // events in response to certain states (in particular sending the Initialized event
-        // when initialization completes).
-        let (etx, mut erx) = mpsc::channel(128);
-        self.events = Some(etx);
+        // Perform the initialization handshake with the interface to exchange version info.
+        // We can't proceed if we fail to manage this initialization protocol.
+        let interface_version = self
+            .connection
+            .initialize(version.clone(), self.config.enable_stack_hack)?;
+
+        // Perform some version checking and send diagnostics to the client if we have a mismatch.
+        match interface_version.cmp(&version) {
+            Ordering::Less => {
+                // Interface is out of date.
+                self.client.send_event(Event{ body: EventBody::Output(OutputEventBody {
+                    category: Some(OutputEventCategory::Important),
+                    output: "The debugger interface version is outdated. Please re-run the installation task to update.".to_string(),
+                    ..Default::default()
+                })})?;
+            }
+            Ordering::Greater => {
+                // The interface is newer than this adapter.
+                self.client.send_event(Event{ body: EventBody::Output(OutputEventBody {
+                    category: Some(OutputEventCategory::Important),
+                    output: "The Unrealscript debugger extension is older than the interface version installed in Unreal. Please update the extension.".to_string(),
+                    ..Default::default()
+                })})?;
+            }
+            Ordering::Equal => (),
+        };
 
         // Now that we're connected we can tell the client that we're ready to receive breakpoint
         // info, etc. Send the 'initialized' event.
-        self.queue_event(Event {
+        self.client.send_event(Event {
             body: events::EventBody::Initialized,
-        });
+        })?;
 
         loop {
             select! {
@@ -235,19 +246,6 @@ where
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             log::error!("Control queue full!");
                         },
-                    };
-                }
-                evt = erx.recv() => {
-                    match evt {
-                        Some(evt) => {
-                            log::trace!("Dispatching event: {evt:?}");
-                            self.client.send_event(evt)?;
-                        },
-                        None => {
-                            // This should not be possible since self contains the sending end of
-                            // the channel.
-                            unreachable!("The event channel cannot close while the adapter is running.");
-                        }
                     };
                 }
             };
@@ -663,13 +661,13 @@ where
         // stack frame. Clicking on it again will go to the correct line.
         if invalidated && self.config.supports_invalidated_event {
             log::trace!("Invalidating frame {}", var.frame());
-            self.queue_event(Event {
+            self.client.send_event(Event {
                 body: EventBody::Invalidated(InvalidatedEventBody {
                     areas: Some(vec![InvalidatedAreas::Stacks]),
                     thread_id: None,
                     stack_frame_id: Some(var.frame().into()),
                 }),
-            });
+            })?;
         }
         Ok(ResponseBody::Variables(VariablesResponse {
             variables: vars

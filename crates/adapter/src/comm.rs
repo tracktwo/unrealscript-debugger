@@ -8,8 +8,8 @@ pub mod tcp;
 use std::io::{Error, ErrorKind};
 
 use common::{
-    Breakpoint, FrameIndex, StackTraceRequest, StackTraceResponse, UnrealCommand, UnrealEvent,
-    UnrealResponse, Variable, VariableIndex, WatchKind,
+    Breakpoint, FrameIndex, InitializeRequest, StackTraceRequest, StackTraceResponse,
+    UnrealCommand, UnrealEvent, UnrealResponse, Variable, VariableIndex, Version, WatchKind,
 };
 use tokio::sync::mpsc::Receiver;
 
@@ -73,6 +73,17 @@ pub trait Connection: Send {
     /// Get a reference to the receiving end of a channel that will receive events
     /// from the interface. These are received asynchronously.
     fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent>;
+
+    /// Send an initialize request to the interface and retreive the response. Exchanges
+    /// version information and other config data.
+    fn initialize(&mut self, version: Version, enable_stack_hack: bool) -> Result<Version, Error> {
+        self.send_command(UnrealCommand::Initialize(InitializeRequest {
+            version,
+            enable_stack_hack,
+        }))?;
+        let response = expect_response!(self.next_response(), UnrealResponse::Initialize)?;
+        Ok(response.version)
+    }
 
     /// Add a breakpoint.
     fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, Error> {

@@ -218,7 +218,7 @@
 //! Now figure out where `v4` comes from. In the UDK this is:
 //!
 //! > `v4 = (DWORD*)sub_EF6690((*DWORD)(v3 + 12) - stackIdx - 1);`
-//! 
+//!
 //! Where `stackIdx` is the parameter to this function. In turn v3 comes from:
 //!
 //! > `v3 = this->field_5C`
@@ -252,6 +252,8 @@
 //! `manager_callstack_entry_array_offset`, the last two pieces of information.
 
 use std::ffi::c_char;
+
+use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
 
 /// A model representing the expected layout within a `DebuggerCore` instance.
 ///
@@ -323,10 +325,48 @@ pub struct StackHack {
     model: StackHackModel,
 }
 
+/// Safety:
+///
+/// This is not generally safe. The core pointer comes from Unreal and is only
+/// valid for as long as the debug session is active. This is OK for us since
+/// the static debugger object that holds it also dies with the debugging session.
+///
+/// It's also not necessarily safe to use across threads: we can only use this
+/// pointer from the Unreal thread, never from the thread we spawn to manage
+/// the interface loop. Unfortunately the debugger interface API does not give
+/// us any place to store a value with unreal that gets sent back to all contexts,
+/// so we are forced to use global data to represent this state.
+unsafe impl Send for StackHack {}
+
 impl StackHack {
-    /// Construct a new StackHack instance from the given pointer and a model.
-    pub fn new(core: *const c_char, model: StackHackModel) -> Self {
-        Self { core, model }
+    /// Create a new stackhack instance wtih the given model.
+    ///
+    /// This will attempt to locate the debugger core instance in the Unreal
+    /// process.
+    ///
+    /// # Returns
+    ///
+    /// `Some(inst)` if we are able to locate the debugger instance
+    /// `None` if we fail to locate an exported debugger instance.
+    ///
+    /// # Safety
+    ///
+    /// Uses unsafe raw Windows APIs
+    pub unsafe fn create(model: StackHackModel) -> Option<Self> {
+        let module = GetModuleHandleA(std::ptr::null());
+        log::trace!("Stack hack module: {module:?}");
+        if !module.is_null() {
+            let ptr = GetProcAddress(module, "GDebugger\0".as_ptr() as *const i8);
+            log::trace!("Stack hack debugger: {ptr:?}");
+            if !ptr.is_null() {
+                return Some(StackHack {
+                    core: ptr as *const i8,
+                    model,
+                });
+            }
+        }
+
+        None
     }
 
     /// Look up the line for the given entry index in the current stack frame.
@@ -339,7 +379,6 @@ impl StackHack {
     /// Not even a little. If the chosen model does not match the game
     /// we're attached to this will either crash or just return garbage.
     pub unsafe fn line_for(&self, idx: usize) -> Option<i32> {
-
         // Locate the pointer to the manager in core.
         let manager_ptr = self.core.add(self.model.core_callstack_manager_offset);
 
@@ -364,12 +403,11 @@ impl StackHack {
         let inverted_idx = depth - idx - 1;
 
         // Locate the pointer to the entry array in the manager
-        let entry_array_ptr = manager
-            .add(self.model.manager_callstack_entry_array_offset);
+        let entry_array_ptr = manager.add(self.model.manager_callstack_entry_array_offset);
 
         // Dereference this pointer to get a pointer to the first element of the entry array
         let entry_ptr = *(entry_array_ptr as *const *const u8);
-        
+
         // Advance to the desired element of the array
         let entry_ptr = entry_ptr.add(self.model.entry_size * inverted_idx);
 
@@ -384,7 +422,7 @@ impl StackHack {
 
         // Dereference this pointer to get a pointer to the first element of the line array
         let line_ptr = *(line_array_ptr as *const *const i32);
-        
+
         // Advance to the desired element of the array. Note that the line index is 1-based,
         // and since we are using a pointer to i32s as this type we just advance by the index
         // and not 4x the index.
@@ -510,6 +548,11 @@ mod tests {
         [2, 73, 179, 283, 419, 547, 661, 811, 947, 1087, 1229, 1381]
     }
 
+    /// Construct a new StackHack instance from the given pointer and a model.
+    pub fn mock_stack_hack(core: *const c_char, model: StackHackModel) -> StackHack {
+        StackHack { core, model }
+    }
+
     #[test]
     fn check_entry() {
         let line_array = make_line_array();
@@ -572,7 +615,7 @@ mod tests {
         let mgr = make_manager(entry.as_ptr(), 1);
         let core = make_core(&mgr as *const CallstackMgr);
         let core_ptr = &core as *const DebugCore;
-        let hack = StackHack::new(core_ptr as *const c_char, DEFAULT_MODEL);
+        let hack = mock_stack_hack(core_ptr as *const c_char, DEFAULT_MODEL);
         let line = unsafe { hack.line_for(0) };
         assert_eq!(line.unwrap(), 73);
     }
@@ -593,7 +636,7 @@ mod tests {
         let mgr = make_manager(entry.as_ptr(), 4);
         let core = make_core(&mgr as *const CallstackMgr);
         let core_ptr = &core as *const DebugCore;
-        let hack = StackHack::new(core_ptr as *const c_char, DEFAULT_MODEL);
+        let hack = mock_stack_hack(core_ptr as *const c_char, DEFAULT_MODEL);
 
         // Request the 2nd to top frame
         let line = unsafe { hack.line_for(1) };

@@ -30,3 +30,7 @@ path="log.rs"
 name="variables"
 path="variables.rs"
 
+[[test]]
+name="version"
+path="version.rs"
+
