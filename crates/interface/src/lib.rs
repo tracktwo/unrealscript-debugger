@@ -14,11 +14,11 @@ use std::sync::{Condvar, Mutex};
 
 use debugger::Debugger;
 use flexi_logger::LoggerHandle;
-pub mod lifetime;
-
-pub mod debugger;
 
 pub mod api;
+pub mod debugger;
+pub mod lifetime;
+pub mod stackhack;
 
 /// The debugger state. Calls from Unreal are dispatched into this instance.
 static DEBUGGER: Mutex<Option<Debugger>> = Mutex::new(None);
