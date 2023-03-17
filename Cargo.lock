@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "adapter"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bit_field",
  "bytes",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
 ]
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "interface"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "common",
  "flexi_logger",

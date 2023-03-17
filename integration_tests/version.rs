@@ -75,10 +75,7 @@ async fn larger_major() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(
-                    o.category.unwrap(),
-                    OutputEventCategory::Important
-                ));
+                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -132,10 +129,7 @@ async fn larger_minor() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(
-                    o.category.unwrap(),
-                    OutputEventCategory::Important
-                ));
+                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -189,10 +183,7 @@ async fn larger_patch() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(
-                    o.category.unwrap(),
-                    OutputEventCategory::Important
-                ));
+                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -246,10 +237,7 @@ async fn smaller_major() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(
-                    o.category.unwrap(),
-                    OutputEventCategory::Important
-                ));
+                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -303,10 +291,7 @@ async fn smaller_minor() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(
-                    o.category.unwrap(),
-                    OutputEventCategory::Important
-                ));
+                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -360,10 +345,7 @@ async fn smaller_patch() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(
-                    o.category.unwrap(),
-                    OutputEventCategory::Important
-                ));
+                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };

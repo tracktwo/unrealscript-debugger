@@ -640,7 +640,7 @@ mod tests {
         let hack = mock_stack_hack(core_ptr as *const c_char, DEFAULT_MODEL);
 
         // Request the 2nd to top frame
-        let line = unsafe { hack.line_for(1) };
+        let line = unsafe { hack.line_for(2) };
         assert_eq!(line.unwrap(), 547);
     }
 }

@@ -153,7 +153,7 @@ where
             Ordering::Less => {
                 // Interface is out of date.
                 self.client.send_event(Event{ body: EventBody::Output(OutputEventBody {
-                    category: Some(OutputEventCategory::Important),
+                    category: Some(OutputEventCategory::Console),
                     output: "The debugger interface version is outdated. Please re-run the installation task to update.".to_string(),
                     ..Default::default()
                 })})?;
@@ -161,7 +161,7 @@ where
             Ordering::Greater => {
                 // The interface is newer than this adapter.
                 self.client.send_event(Event{ body: EventBody::Output(OutputEventBody {
-                    category: Some(OutputEventCategory::Important),
+                    category: Some(OutputEventCategory::Console),
                     output: "The Unrealscript debugger extension is older than the interface version installed in Unreal. Please update the extension.".to_string(),
                     ..Default::default()
                 })})?;

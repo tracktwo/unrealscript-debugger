@@ -6,11 +6,8 @@
 #![warn(missing_docs)]
 
 // TODO:
-//  - Add a version check between the adapter and interface and use that to send
-//  a message to the client to indicate a plugin update requires a reinstall of
-//  the interface.
 //
-//  - Figure out why non-top stack hovers aren't working.
+// - Fix language encodings
 
 use dap::responses::ErrorMessage;
 use thiserror::Error;

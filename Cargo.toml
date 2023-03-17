@@ -2,6 +2,6 @@
 members = ["crates/*", "integration_tests"]
 
 [workspace.dependencies]
-common = { path = "./crates/common", version="0.0.0" }
-interface = { path = "./crates/interface", version="0.0.0" }
-adapter = { path = "./crates/adapter", version="0.0.0" }
+common = { path = "./crates/common" }
+interface = { path = "./crates/interface" }
+adapter = { path = "./crates/adapter" }
