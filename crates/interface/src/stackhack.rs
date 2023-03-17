@@ -478,21 +478,21 @@ mod tests {
             pub padding2: [u32; 11],
         }
 
-        pub fn make_test_entry(line_array: *const u32) -> CallstackEntry {
+        pub fn make_entry(line_array: *const u32, line_index: u32) -> CallstackEntry {
             CallstackEntry {
                 padding1: [0; 3],
                 line_array,
-                line_index: 2,
+                line_index,
                 padding2: [0; 11],
             }
         }
 
-        pub fn make_test_manager(entry: *const CallstackEntry) -> CallstackMgr {
+        pub fn make_manager(entry: *const CallstackEntry, depth: u32) -> CallstackMgr {
             CallstackMgr {
                 padding1: 0,
                 padding2: 0,
                 entry_ptr: entry,
-                depth: 7,
+                depth,
             }
         }
 
