@@ -651,15 +651,21 @@ where
                 ))?,
             )?;
 
-        // If this response involved changing stacks and the client supports it, send an invalidated event
-        // This is useful for unreal because we don't have line information for anything except the
+        // If this response involved changing stacks, we aren't using the stack hack, and the client
+        // supports the feature, send an invalidated stack event for this frame.
+        //
+        // This is useful for Unreal because we don't have line information for anything except the
         // top-most stack frame until we actually switch to that other frame. This event will
         // instruct the client to refresh this single stack frame, which will allow us to provide a
         // useful line number. This is not perfect: the client tries to switch to the source file
         // and incorrect (0) line number before asking for the variables and before we send this
         // event, so it will jump to the file but the wrong line the first time you switch to that
         // stack frame. Clicking on it again will go to the correct line.
-        if invalidated && self.config.supports_invalidated_event {
+        //
+        // When the stack hack is enabled we don't need this because we did fetch line number info
+        // for all frames when we received the callstack from Unreal and these were all returned
+        // in the original StackTraceResponse.
+        if invalidated && self.config.supports_invalidated_event && !self.config.enable_stack_hack {
             log::trace!("Invalidating frame {}", var.frame());
             self.client.send_event(Event {
                 body: EventBody::Invalidated(InvalidatedEventBody {

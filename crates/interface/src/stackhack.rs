@@ -356,20 +356,27 @@ impl StackHack {
         let module = GetModuleHandleA(std::ptr::null());
         log::trace!("Stack hack module: {module:?}");
         if !module.is_null() {
-            let ptr = GetProcAddress(module, "GDebugger\0".as_ptr() as *const i8);
+            // Locate the GDebugger export. This the address of a pointer to the core instance so we need to
+            // dereference it.
+            let ptr =
+                GetProcAddress(module, "GDebugger\0".as_ptr() as *const i8) as *const *const i8;
             log::trace!("Stack hack debugger: {ptr:?}");
             if !ptr.is_null() {
-                return Some(StackHack {
-                    core: ptr as *const i8,
-                    model,
-                });
+                return Some(StackHack { core: *ptr, model });
             }
         }
 
         None
     }
 
-    /// Look up the line for the given entry index in the current stack frame.
+    /// Look up the line for the given entry index in the current call stack.
+    ///
+    /// # Parameters
+    ///
+    /// The index is in Unreal ordering. That is, index 0 is the bottom of the
+    /// stack. This is the natural order in which Unreal provides callstack
+    /// entries, so this index should be the same as the number of callstack add
+    /// calls we have already received on this break.
     ///
     /// # Returns
     /// A Some holding the line number for this stack entry, or None
@@ -396,12 +403,6 @@ impl StackHack {
             return None;
         }
 
-        // The index given uses index 0 as "top-most stack entry", but Unreal
-        // stores the frames in order from bottom-most to top-most so we need
-        // to compute the actual index into the array. For example 0 would be
-        // the element at depth-1.
-        let inverted_idx = depth - idx - 1;
-
         // Locate the pointer to the entry array in the manager
         let entry_array_ptr = manager.add(self.model.manager_callstack_entry_array_offset);
 
@@ -409,7 +410,7 @@ impl StackHack {
         let entry_ptr = *(entry_array_ptr as *const *const u8);
 
         // Advance to the desired element of the array
-        let entry_ptr = entry_ptr.add(self.model.entry_size * inverted_idx);
+        let entry_ptr = entry_ptr.add(self.model.entry_size * idx);
 
         // Locate the pointer to the line index in the entry
         let line_idx_ptr = entry_ptr.add(self.model.entry_line_index_offset) as *const u32;

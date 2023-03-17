@@ -656,21 +656,36 @@ impl Debugger {
         let class_name = it.next().unwrap_or("");
         let function_name = it.next().unwrap_or("");
 
-        // Create the new frame data. We don't know if this will be the last callstack
-        // entry or not, and the current line number is for the last entry. Set it
-        // pre-emptively, and we'll clear it if and when we get another entry.
-        let frame = Frame {
-            qualified_name: class_name.to_string(),
-            function_name: function_name.to_string(),
-            line: self.current_line,
+        let frame = match &self.stack_hack {
+            Some(hack) => {
+                let line = unsafe { hack.line_for(self.callstack.len()).unwrap_or(0) };
+                Frame {
+                    qualified_name: class_name.to_string(),
+                    function_name: function_name.to_string(),
+                    line,
+                }
+            }
+            None => {
+                // Create the new frame data. We don't know if this will be the last callstack
+                // entry or not, and the current line number is for the last entry. Set it
+                // pre-emptively, and we'll clear it if and when we get another entry.
+                let frame = Frame {
+                    qualified_name: class_name.to_string(),
+                    function_name: function_name.to_string(),
+                    line: self.current_line,
+                };
+
+                // If we previously added an entry clear the line since it wasn't the top-most
+                // entry.
+                if !self.callstack.is_empty() {
+                    let last = self.callstack.len() - 1;
+                    self.callstack[last].line = 0;
+                }
+
+                frame
+            }
         };
 
-        // If we previously added an entry clear the line since it wasn't the top-most
-        // entry.
-        if !self.callstack.is_empty() {
-            let last = self.callstack.len() - 1;
-            self.callstack[last].line = 0;
-        }
         self.callstack.push(frame);
     }
 
