@@ -339,14 +339,20 @@ impl StackHack {
     /// Not even a little. If the chosen model does not match the game
     /// we're attached to this will either crash or just return garbage.
     pub unsafe fn line_for(&self, idx: usize) -> Option<i32> {
-        let core_usize = self.core as usize;
-        let manager_usize = core_usize + self.model.core_callstack_manager_offset;
-        let manager_addr = self.core.add(self.model.core_callstack_manager_offset);
-        let manager_add_usize = manager_addr as usize;
-        let manager = *manager_addr as *const u8;
-        let depth_addr = manager.add(self.model.manager_callstack_depth_offset) as *const u32;
-        let depth_usize = depth_addr as usize;
-        let depth = *depth_addr as usize;
+
+        // Locate the pointer to the manager in core.
+        let manager_ptr = self.core.add(self.model.core_callstack_manager_offset);
+
+        // Deference this pointer to get a pointer to the manager object
+        let manager = *(manager_ptr as *const *const u8);
+
+        // Locate the pointer to the stack depth in the manager
+        let depth_ptr = manager.add(self.model.manager_callstack_depth_offset) as *const u32;
+
+        // Dereference this pointer to get the stack depth
+        let depth = *depth_ptr as usize;
+
+        // Make sure the index we were given is present
         if idx >= depth {
             return None;
         }
@@ -357,19 +363,35 @@ impl StackHack {
         // the element at depth-1.
         let inverted_idx = depth - idx - 1;
 
-        let entry_addr = manager
-            .add(self.model.manager_callstack_entry_array_offset)
-            .add(self.model.entry_size * inverted_idx);
+        // Locate the pointer to the entry array in the manager
+        let entry_array_ptr = manager
+            .add(self.model.manager_callstack_entry_array_offset);
 
-        let entry = *entry_addr as *const u8;
-        let line_idx_addr = entry.add(self.model.entry_line_index_offset) as *const u32;
+        // Dereference this pointer to get a pointer to the first element of the entry array
+        let entry_ptr = *(entry_array_ptr as *const *const u8);
+        
+        // Advance to the desired element of the array
+        let entry_ptr = entry_ptr.add(self.model.entry_size * inverted_idx);
 
-        let line_idx = *line_idx_addr as usize;
-        let line_array_addr = entry.add(self.model.entry_line_array_offset);
-        let line_array = *line_array_addr as *const i32;
-        let line = *line_array.add(line_idx - 1);
+        // Locate the pointer to the line index in the entry
+        let line_idx_ptr = entry_ptr.add(self.model.entry_line_index_offset) as *const u32;
 
-        Some(line)
+        // Dereference this pointer to get the line index
+        let line_idx = *line_idx_ptr as usize;
+
+        // Locate the pointer to the line array in the entry
+        let line_array_ptr = entry_ptr.add(self.model.entry_line_array_offset);
+
+        // Dereference this pointer to get a pointer to the first element of the line array
+        let line_ptr = *(line_array_ptr as *const *const i32);
+        
+        // Advance to the desired element of the array. Note that the line index is 1-based,
+        // and since we are using a pointer to i32s as this type we just advance by the index
+        // and not 4x the index.
+        let line_ptr = line_ptr.add(line_idx - 1);
+
+        // Dereference this pointer to obtain the line
+        Some(*line_ptr)
     }
 }
 
@@ -404,23 +426,23 @@ mod tests {
             pub padding4: u32,
         }
 
-        pub fn make_test_entry(line_array: *const u32) -> CallstackEntry {
+        pub fn make_entry(line_array: *const u32, line_index: u32) -> CallstackEntry {
             CallstackEntry {
                 padding1: [0; 3],
                 line_array,
-                line_index: 2,
+                line_index,
                 padding2: 0,
                 padding3: [0; 6],
                 padding4: 0,
             }
         }
 
-        pub fn make_test_manager(entry: *const CallstackEntry) -> CallstackMgr {
+        pub fn make_manager(entry: *const CallstackEntry, depth: u32) -> CallstackMgr {
             CallstackMgr {
                 padding1: 0,
                 padding2: 0,
                 entry_ptr: entry,
-                depth: 7,
+                depth,
             }
         }
 
@@ -491,7 +513,7 @@ mod tests {
     #[test]
     fn check_entry() {
         let line_array = make_line_array();
-        let entry = make_test_entry(line_array.as_ptr());
+        let entry = make_entry(line_array.as_ptr(), 1);
         let ptr = std::ptr::addr_of!(entry);
         let base = ptr as usize;
         let line_array_addr = std::ptr::addr_of!(entry.line_array) as usize;
@@ -513,8 +535,8 @@ mod tests {
     #[test]
     fn check_callstack_manager() {
         let line_array = make_line_array();
-        let entry: [CallstackEntry; 1] = [make_test_entry(line_array.as_ptr())];
-        let mgr = make_test_manager(entry.as_ptr());
+        let entry: [CallstackEntry; 1] = [make_entry(line_array.as_ptr(), 1)];
+        let mgr = make_manager(entry.as_ptr(), 1);
 
         let base = std::ptr::addr_of!(mgr) as usize;
         let callstack_depth_addr = std::ptr::addr_of!(mgr.depth) as usize;
@@ -533,8 +555,8 @@ mod tests {
     #[test]
     fn check_core() {
         let line_array = make_line_array();
-        let entry: [CallstackEntry; 1] = [make_test_entry(line_array.as_ptr())];
-        let mgr = make_test_manager(entry.as_ptr());
+        let entry: [CallstackEntry; 1] = [make_entry(line_array.as_ptr(), 1)];
+        let mgr = make_manager(entry.as_ptr(), 1);
         let core = make_core(&mgr as *const CallstackMgr);
 
         let base = std::ptr::addr_of!(core) as usize;
@@ -546,13 +568,35 @@ mod tests {
     #[test]
     fn it_works() {
         let line_array = make_line_array();
-        let entry: [CallstackEntry; 1] = [make_test_entry(line_array.as_ptr())];
-        let mgr = make_test_manager(entry.as_ptr());
+        let entry: [CallstackEntry; 1] = [make_entry(line_array.as_ptr(), 2)];
+        let mgr = make_manager(entry.as_ptr(), 1);
         let core = make_core(&mgr as *const CallstackMgr);
-        let core_usize = &core as *const DebugCore as usize;
         let core_ptr = &core as *const DebugCore;
         let hack = StackHack::new(core_ptr as *const c_char, DEFAULT_MODEL);
         let line = unsafe { hack.line_for(0) };
-        assert_eq!(line.unwrap(), 37);
+        assert_eq!(line.unwrap(), 73);
+    }
+
+    #[test]
+    fn other_frame_works() {
+        let line_array = make_line_array();
+
+        // Make an array of 4 entries, 3 of which are empty and will definitely
+        // fail the test if referenced. The 2nd to last entry is good and is set
+        // to the 6th entry in the line array.
+        let entry: [CallstackEntry; 4] = [
+            make_entry(std::ptr::null(), 1),
+            make_entry(std::ptr::null(), 1),
+            make_entry(line_array.as_ptr(), 6),
+            make_entry(std::ptr::null(), 1),
+        ];
+        let mgr = make_manager(entry.as_ptr(), 4);
+        let core = make_core(&mgr as *const CallstackMgr);
+        let core_ptr = &core as *const DebugCore;
+        let hack = StackHack::new(core_ptr as *const c_char, DEFAULT_MODEL);
+
+        // Request the 2nd to top frame
+        let line = unsafe { hack.line_for(1) };
+        assert_eq!(line.unwrap(), 547);
     }
 }
