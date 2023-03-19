@@ -86,7 +86,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                                 Command::Initialize(args) => self.initialize(&request, args)?,
                                 Command::Attach(args) => return self.attach(&request, args).await,
                                 Command::Launch(args) => return self.launch(&request, args).await,
-                                Command::Disconnect => {
+                                Command::Disconnect(_) => {
                                     log::info!("Received disconnect message during connection phase.");
                                     return Err(DisconnectedAdapterError::NoConnection(self));
                                 },
@@ -205,7 +205,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
             .as_ref()
             .ok_or(UnrealscriptAdapterError::NoProgram)?;
 
-        let program_args = args.arguments.as_ref();
+        let program_args = args.args.as_ref();
 
         let mut command = &mut std::process::Command::new(program);
         if let Some(a) = program_args {

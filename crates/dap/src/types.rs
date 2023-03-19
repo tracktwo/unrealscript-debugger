@@ -32,6 +32,7 @@ pub struct StackFrame {
     pub name: String,
     pub source: Option<Source>,
     pub line: i64,
+    pub column: i64,
 }
 
 #[derive(Serialize, Debug)]
@@ -92,14 +93,14 @@ impl VariableReferenceInfo {
         if is_array {
             Self {
                 variables_reference: reference,
-                named_variables: Some(count),
-                indexed_variables: None,
+                named_variables: None,
+                indexed_variables: Some(count),
             }
         } else {
             Self {
                 variables_reference: reference,
-                named_variables: None,
-                indexed_variables: Some(count),
+                named_variables: Some(count),
+                indexed_variables: None,
             }
         }
     }

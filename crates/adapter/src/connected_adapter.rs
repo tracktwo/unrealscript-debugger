@@ -257,12 +257,12 @@ where
         &mut self,
         request: &Request,
     ) -> Result<Option<ResponseBody>, UnrealscriptAdapterError> {
-        log::info!("Got request {request:#?}");
+        log::trace!("Dispatching request {}", request.command.to_string());
         match &request.command {
             Command::SetBreakpoints(args) => Ok(Some(self.set_breakpoints(args)?)),
             Command::Threads => Ok(Some(self.threads()?)),
             Command::ConfigurationDone => Ok(None),
-            Command::Disconnect => {
+            Command::Disconnect(_) => {
                 self.disconnect()?;
                 Ok(None)
             }
@@ -270,23 +270,23 @@ where
             Command::Scopes(args) => Ok(Some(self.scopes(args)?)),
             Command::Variables(args) => Ok(Some(self.variables(args)?)),
             Command::Evaluate(args) => Ok(Some(self.evaluate(args)?)),
-            Command::Pause => {
+            Command::Pause(_) => {
                 self.pause()?;
                 Ok(None)
             }
-            Command::Continue => {
+            Command::Continue(_) => {
                 self.go()?;
                 Ok(None)
             }
-            Command::Next => {
+            Command::Next(_) => {
                 self.next()?;
                 Ok(None)
             }
-            Command::StepIn => {
+            Command::StepIn(_) => {
                 self.step_in()?;
                 Ok(None)
             }
-            Command::StepOut => {
+            Command::StepOut(_) => {
                 self.step_out()?;
                 Ok(None)
             }
@@ -525,6 +525,7 @@ where
                         name: f.function_name,
                         source,
                         line: f.line as i64,
+                        column: 0,
                     }
                 })
                 .collect(),
@@ -591,13 +592,13 @@ where
         &mut self,
         args: &EvaluateArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        let var = self.connection.evaluate(&args.expression)?;
+        let mut var = self.connection.evaluate(&args.expression)?;
 
-        // We may get back a `None`, which means that something has gone wrong with evaluating this
+        // We may get back a vector of length 0, which means that something has gone wrong with evaluating this
         // expression. This is not a typical error, passing an invalid expression will usually
         // still provide a valid response with a value indicating that the expression can't be
         // resolved. Send an error back to the client in this case.
-        let var = var.ok_or(UnrealscriptAdapterError::WatchError(
+        let var = var.pop().ok_or(UnrealscriptAdapterError::WatchError(
             args.expression.clone(),
         ))?;
         let child_count = self.get_child_count(WatchKind::User, &var);
@@ -884,7 +885,7 @@ mod tests {
             unreachable!()
         }
 
-        fn evaluate(&mut self, _expr: &str) -> Result<Option<Variable>, Error> {
+        fn evaluate(&mut self, _expr: &str) -> Result<Vec<Variable>, Error> {
             unreachable!()
         }
 

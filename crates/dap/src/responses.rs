@@ -86,6 +86,7 @@ pub struct ContinueResponseBody {
 #[derive(Serialize, Debug)]
 #[serde(rename = "stackTrace")]
 pub struct StackTraceResponseBody {
+    #[serde(rename = "stackFrames")]
     pub stack_frames: Vec<StackFrame>,
 }
 

@@ -324,15 +324,16 @@ pub enum UnrealResponse {
     /// The number of watches found.
     WatchCount(usize),
     /// A response to a [`UnrealRequest.Variables`] request with a list of variables
-    /// that were immediately accessible.
+    /// that were immediately accessible. Also used for [`UnrealRequest.Evaluate`] as
+    /// a response for a watch, in which case the result is a vector with 1 element.
+    /// watch.
     Variables(Vec<Variable>),
     /// A response to a [`UnrealRequest.Variables`] request with a list of variables
     /// that required the debugger to change the current stack frame. This can be
     /// used by the adapter to invalidate the stack frame prompting a request of
-    /// the frame information again.
+    /// the frame information again. This is also used for [`UnrealRequest.Evaluate`]
+    /// for the same scenario as [`Variables`].
     DeferredVariables(Vec<Variable>),
-    /// The result of a variable evaluation (i.e. a user watch).
-    Evaluate(Option<Variable>),
 }
 
 /// Events that can be sent from the interface at any time.

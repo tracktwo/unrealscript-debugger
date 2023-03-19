@@ -255,7 +255,10 @@ impl Debugger {
                     "Variable: {kind:?} frame={frame} parent={parent} start={start} count={count}"
                 );
 
-                if frame != self.current_frame {
+                // If this is a request for a variable not in our current frame then switch frames
+                // and return a deferred response. User watches never require a frame switch,
+                // because they're provided on each frame.
+                if matches!(kind, WatchKind::User) && frame != self.current_frame {
                     // We should not be processing new commands while a variable request is
                     // outstanding. This should never happen, but if it does return an empty
                     // variables list -- hopefully we can recover.
@@ -303,9 +306,9 @@ impl Debugger {
                 if !self.user_watches.is_empty() {
                     for idx in &self.user_watches[0].children {
                         if self.user_watches[*idx].name == expr {
-                            self.send_response(UnrealResponse::Evaluate(Some(
-                                self.user_watches[*idx].to_variable(*idx),
-                            )))?;
+                            self.send_response(UnrealResponse::Variables(vec![self.user_watches
+                                [*idx]
+                                .to_variable(*idx)]))?;
                             return Ok(CommandAction::Nothing);
                         }
                     }
@@ -581,8 +584,11 @@ impl Debugger {
                 // Update the current stack frame to represent the new state.
                 self.current_frame = req.frame;
 
-                // If this pending request is a user watch we want to send back an 'Evaluate'
-                // reponse, otherwise we want to send a 'Variables' response.
+                // If the deferred request was for a variables list then we will have indexing
+                // information (parent, start, count) to return a list of variables as per normal.
+                // If this request was for a newly-added user watch then we don't have any of that,
+                // and instead we expect the new watch to be the last element in the user watch
+                // list.
                 match req.kind {
                     WatchKind::User => {
                         // The new user watch will be the last one added to the user watchlist,
@@ -592,10 +598,14 @@ impl Debugger {
                                 .last()
                                 .map(|c| self.user_watches[*c].to_variable(*c))
                         });
-                        if var.is_none() {
+                        let mut var_vec = Vec::new();
+                        if let Some(v) = var {
+                            var_vec.push(v);
+                        } else {
                             log::error!("User watchlist unlocked from a pending user watch but watchlist is empty!");
                         }
-                        self.send_response(UnrealResponse::Evaluate(var))
+
+                        self.send_response(UnrealResponse::Variables(var_vec))
                             .unwrap_or_else(|_| {
                                 log::error!("Failed to send response for user watch");
                             });

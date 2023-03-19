@@ -17,21 +17,29 @@ pub struct Request {
 pub enum Command {
     Attach(AttachArguments),
     ConfigurationDone,
-    Continue,
-    Disconnect,
+    Continue(IgnoredArguments),
+    Disconnect(IgnoredArguments),
     Evaluate(EvaluateArguments),
     Initialize(InitializeArguments),
     Launch(LaunchArguments),
-    Next,
-    Pause,
+    Next(IgnoredArguments),
+    Pause(IgnoredArguments),
     Scopes(ScopesArguments),
     SetBreakpoints(SetBreakpointsArguments),
     StackTrace(StackTraceArguments),
-    StepIn,
-    StepOut,
+    StepIn(IgnoredArguments),
+    StepOut(IgnoredArguments),
     Threads,
     Variables(VariablesArguments),
 }
+
+/// A dummy struct with no members.
+///
+/// This is used as a parameter type for [`Command`] variants where we don't
+/// care about any of the arguments DAP provides, but we need something to tell
+/// serde that it will still have an `arguments` key that needs to map to something.
+#[derive(Deserialize, Debug)]
+pub struct IgnoredArguments {}
 
 #[derive(Deserialize, Debug)]
 pub struct AttachArguments {
@@ -63,7 +71,7 @@ pub struct LaunchArguments {
     pub source_roots: Option<Vec<String>>,
     pub enable_stack_hack: Option<bool>,
     pub program: Option<String>,
-    pub arguments: Option<Vec<String>>,
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug)]

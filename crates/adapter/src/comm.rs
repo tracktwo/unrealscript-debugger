@@ -120,9 +120,17 @@ pub trait Connection: Send {
     }
 
     /// Evaluate the given string in the current debugger context.
-    fn evaluate(&mut self, expr: &str) -> Result<Option<Variable>, Error> {
+    fn evaluate(&mut self, expr: &str) -> Result<Vec<Variable>, Error> {
         self.send_command(UnrealCommand::Evaluate(expr.to_string()))?;
-        expect_response!(self.next_response(), UnrealResponse::Evaluate)
+        match self.next_response() {
+            Ok(UnrealResponse::Variables(vars)) => Ok(vars),
+            Ok(UnrealResponse::DeferredVariables(vars)) => Ok(vars),
+            Ok(r) => Err(Error::new(
+                ErrorKind::Other,
+                format!("Protocol Error: {r:?}"),
+            )),
+            Err(e) => Err(e),
+        }
     }
 
     /// Request a list of variables. This may be a list of top-level variables

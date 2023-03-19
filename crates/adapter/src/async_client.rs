@@ -266,6 +266,7 @@ impl Decoder for AsyncClientDecoder {
                         // these again.
                         let packet = src.split_to(self.body_len + self.body_start);
                         // Process the packet and return the message if successful.
+                        log::trace!("Decoded request: {}", String::from_utf8_lossy(&packet));
                         let msg = self.process_message(&packet)?;
                         self.state = State::Header;
                         self.body_start = 0;
