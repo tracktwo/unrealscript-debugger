@@ -1,7 +1,7 @@
 //! Integration tests for communications between the adapter and interface: logging.
 
 use common::{InitializeResponse, UnrealCommand, UnrealResponse, Version};
-use dap::{events::EventBody, types::OutputEventCategory};
+use dap::{events::EventBody, events::OutputEventCategory};
 use futures::StreamExt;
 mod fixture;
 
@@ -38,10 +38,7 @@ async fn simple_log() {
         let evt = erx.recv().await.unwrap();
         match &evt.body {
             EventBody::Output(obody) => {
-                assert!(matches!(
-                    obody.category.as_ref().unwrap(),
-                    OutputEventCategory::Stdout
-                ));
+                assert!(matches!(obody.category, OutputEventCategory::Stdout));
                 assert_eq!(obody.output, "Log line!\r\n");
             }
             b => panic!("Expected an output event but got {b:?}"),
@@ -49,7 +46,7 @@ async fn simple_log() {
 
         // Finally we'll get a terminated event because we closed the interface connection.
         let evt = erx.recv().await.unwrap();
-        assert!(matches!(evt.body, EventBody::Terminated(_)));
+        assert!(matches!(evt.body, EventBody::Terminated));
     });
 
     adapter

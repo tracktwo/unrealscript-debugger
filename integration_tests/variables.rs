@@ -1,7 +1,10 @@
 mod fixture;
 use adapter::variable_reference::VariableReference;
 use common::{FrameIndex, UnrealCommand, VariableIndex, WatchKind};
-use dap::prelude::*;
+use dap::{
+    requests::{Command, Request, VariablesArguments},
+    responses::ResponseBody,
+};
 use tokio_stream::StreamExt;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -26,27 +29,25 @@ async fn frame_0() {
     let response = adapter
         .accept(&Request {
             seq: 3,
-            command: Command::Variables(requests::VariablesArguments {
+            command: Command::Variables(VariablesArguments {
                 variables_reference: VariableReference::new(
                     WatchKind::Local,
                     FrameIndex::TOP_FRAME,
                     VariableIndex::SCOPE,
                 )
                 .to_int(),
-                filter: None,
                 start: Some(0),
                 count: Some(0),
-                format: None,
             }),
         })
         .unwrap();
 
     match response {
-        ResponseBody::Variables(resp) => {
+        Some(ResponseBody::Variables(resp)) => {
             assert_eq!(resp.variables.len(), 1);
             let v = &resp.variables[0];
             assert_eq!(v.name, "SomeVar");
-            assert_eq!(v.type_field.as_ref().unwrap(), "Int");
+            assert_eq!(v.ty.as_ref().unwrap(), "Int");
             assert_eq!(v.value, "33");
         }
         o => panic!("Expected a variables response: {o:#?}"),
@@ -82,27 +83,25 @@ async fn frame_2() {
     let response = adapter
         .accept(&Request {
             seq: 3,
-            command: Command::Variables(requests::VariablesArguments {
+            command: Command::Variables(VariablesArguments {
                 variables_reference: VariableReference::new(
                     WatchKind::Local,
                     FrameIndex::create(2).unwrap(),
                     VariableIndex::SCOPE,
                 )
                 .to_int(),
-                filter: None,
                 start: Some(0),
                 count: Some(0),
-                format: None,
             }),
         })
         .unwrap();
 
     match response {
-        ResponseBody::Variables(resp) => {
+        Some(ResponseBody::Variables(resp)) => {
             assert_eq!(resp.variables.len(), 1);
             let v = &resp.variables[0];
             assert_eq!(v.name, "SomeVar");
-            assert_eq!(v.type_field.as_ref().unwrap(), "Int");
+            assert_eq!(v.ty.as_ref().unwrap(), "Int");
             assert_eq!(v.value, "33");
         }
         o => panic!("Expected a variables response: {o:#?}"),

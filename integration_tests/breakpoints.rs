@@ -2,8 +2,8 @@
 
 use common::UnrealCommand;
 use dap::{
-    prelude::*,
-    requests::{Command, Request},
+    requests::{Command, Request, SetBreakpointsArguments},
+    responses::ResponseBody,
     types::{Source, SourceBreakpoint},
 };
 use tokio::task::block_in_place;
@@ -37,22 +37,18 @@ async fn hit_breakpoint() {
     let response = adapter
         .accept(&Request {
             seq: 3,
-            command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
+            command: Command::SetBreakpoints(SetBreakpointsArguments {
                 source: Source {
+                    name: None,
                     path: Some(PACKAGE_CLASSNAME.to_string()),
-                    ..Default::default()
                 },
-                breakpoints: Some(vec![SourceBreakpoint {
-                    line: 10,
-                    ..Default::default()
-                }]),
-                ..Default::default()
+                breakpoints: Some(vec![SourceBreakpoint { line: 10 }]),
             }),
         })
         .unwrap();
 
     match response {
-        ResponseBody::SetBreakpoints(_) => (),
+        Some(ResponseBody::SetBreakpoints(_)) => (),
         o => panic!("Expected a setbreakpoints response: {o:#?}"),
     }
 }
@@ -89,22 +85,18 @@ async fn remove_breakpoint() {
     let response = adapter
         .accept(&Request {
             seq: 3,
-            command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
+            command: Command::SetBreakpoints(SetBreakpointsArguments {
                 source: Source {
+                    name: None,
                     path: Some(PACKAGE_CLASSNAME.to_string()),
-                    ..Default::default()
                 },
-                breakpoints: Some(vec![SourceBreakpoint {
-                    line: 10,
-                    ..Default::default()
-                }]),
-                ..Default::default()
+                breakpoints: Some(vec![SourceBreakpoint { line: 10 }]),
             }),
         })
         .unwrap();
 
     match response {
-        ResponseBody::SetBreakpoints(_) => (),
+        Some(ResponseBody::SetBreakpoints(_)) => (),
         _o => panic!("Expected a setbreakpoints response: {_o:#?}"),
     }
 
@@ -112,19 +104,18 @@ async fn remove_breakpoint() {
     let response = adapter
         .accept(&Request {
             seq: 3,
-            command: Command::SetBreakpoints(requests::SetBreakpointsArguments {
+            command: Command::SetBreakpoints(SetBreakpointsArguments {
                 source: Source {
+                    name: None,
                     path: Some(PACKAGE_CLASSNAME.to_string()),
-                    ..Default::default()
                 },
                 breakpoints: None,
-                ..Default::default()
             }),
         })
         .unwrap();
 
     match response {
-        ResponseBody::SetBreakpoints(_) => (),
+        Some(ResponseBody::SetBreakpoints(_)) => (),
         _o => panic!("Expected a setbreakpoints response: {_o:#?}"),
     }
 }

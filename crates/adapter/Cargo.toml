@@ -17,9 +17,9 @@ thiserror = "1.0"
 bit_field = "0.10"
 memmem = "0.1"
 bytes = "1.4"
-dap = { path = "../../../dap-rs" }
 common.workspace = true
 interface.workspace = true
+dap.workspace = true
 pkg-version = "1.0.0"
 
 

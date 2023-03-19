@@ -5,7 +5,7 @@ use adapter::{
     connected_adapter::UnrealscriptAdapter,
 };
 use common::{UnrealCommand, UnrealInterfaceMessage};
-use dap::{prelude::Event, requests::Request};
+use dap::{events::Event, requests::Request};
 use futures::{executor, stream::SplitStream, SinkExt, StreamExt};
 use interface::debugger::Debugger;
 use tokio::{
@@ -124,7 +124,7 @@ impl AsyncClient for TestClient {
         Ok(())
     }
 
-    fn send_event(&mut self, event: dap::prelude::Event) -> Result<(), std::io::Error> {
+    fn send_event(&mut self, event: Event) -> Result<(), std::io::Error> {
         executor::block_on(async { self.etx.send(event).await.unwrap() });
         Ok(())
     }

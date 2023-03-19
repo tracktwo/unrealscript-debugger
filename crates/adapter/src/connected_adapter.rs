@@ -18,18 +18,20 @@ use common::{
     WatchKind,
 };
 use dap::{
-    events::{EventBody, InvalidatedEventBody, OutputEventBody, StoppedEventBody},
-    prelude::*,
+    events::{
+        Event, EventBody, InvalidatedAreas, InvalidatedEventBody, OutputEventBody,
+        OutputEventCategory, StoppedEventBody, StoppedEventReason,
+    },
     requests::{
-        ContinueArguments, DisconnectArguments, EvaluateArguments, NextArguments, PauseArguments,
-        ScopesArguments, SetBreakpointsArguments, StackTraceArguments, StepInArguments,
-        StepOutArguments, VariablesArguments,
+        Command, EvaluateArguments, Request, ScopesArguments, SetBreakpointsArguments,
+        StackTraceArguments, VariablesArguments,
     },
-    responses::{ContinueResponse, EvaluateResponse, VariablesResponse},
-    types::{
-        InvalidatedAreas, OutputEventCategory, Scope, Source, StackFrame, StoppedEventReason,
-        Thread,
+    responses::{
+        EvaluateResponseBody, Response, ResponseBody, ScopesResponseBody,
+        SetBreakpointsResponseBody, StackTraceResponseBody, ThreadsResponseBody,
+        VariablesResponseBody,
     },
+    types::{Scope, Source, StackFrame, Thread, VariableReferenceInfo},
 };
 use tokio::{select, sync::broadcast};
 
@@ -71,7 +73,6 @@ impl ClassInfo {
         Source {
             name: Some(self.qualify()),
             path: Some(self.file_name.clone()),
-            ..Default::default()
         }
     }
 }
@@ -153,17 +154,15 @@ where
             Ordering::Less => {
                 // Interface is out of date.
                 self.client.send_event(Event{ body: EventBody::Output(OutputEventBody {
-                    category: Some(OutputEventCategory::Console),
+                    category: OutputEventCategory::Console,
                     output: "The debugger interface version is outdated. Please re-run the installation task to update.".to_string(),
-                    ..Default::default()
                 })})?;
             }
             Ordering::Greater => {
                 // The interface is newer than this adapter.
                 self.client.send_event(Event{ body: EventBody::Output(OutputEventBody {
-                    category: Some(OutputEventCategory::Console),
+                    category: OutputEventCategory::Console,
                     output: "The Unrealscript debugger extension is older than the interface version installed in Unreal. Please update the extension.".to_string(),
-                    ..Default::default()
                 })})?;
             }
             Ordering::Equal => (),
@@ -172,7 +171,7 @@ where
         // Now that we're connected we can tell the client that we're ready to receive breakpoint
         // info, etc. Send the 'initialized' event.
         self.client.send_event(Event {
-            body: events::EventBody::Initialized,
+            body: EventBody::Initialized,
         })?;
 
         loop {
@@ -181,12 +180,13 @@ where
                     match request {
                         Some(Ok(request)) => {
                             let response = match self.accept(&request) {
-                                Ok(body) => Response::make_success(&request, body),
+                                Ok(Some(body)) => Response::make_success(&request, body),
+                                Ok(None) => Response::make_ack(&request),
                                 // An error from the request processing code is recoverable. Send
                                 // an error response to the client so it may display it.
                                 Err(e) => {
                                     log::error!("Error processing request: {e}");
-                                    Response::make_error(&request, e.to_error_message())
+                                    Response::make_error(&request, "Request Error".to_string(), e.to_error_message())
                                 },
                             };
                             // Failing to send the response is unrecoverable. This indicates
@@ -227,7 +227,7 @@ where
                             // loop.
                             log::info!("Debuggee has closed the event connection socket.");
                             self.client.send_event(Event{
-                                body: EventBody::Terminated(None)
+                                body: EventBody::Terminated
                             })?;
                             return Ok(());
                         }
@@ -238,7 +238,7 @@ where
                         Ok(ControlMessage::Shutdown) => {
                             log::info!("Shutdown message received. Stopping adapter.");
                             self.client.send_event(Event{
-                                body: EventBody::Terminated(None)
+                                body: EventBody::Terminated
                             })?;
                             return Ok(());
                         },
@@ -253,26 +253,47 @@ where
     }
 
     /// Process a DAP request, returning a response body.
-    pub fn accept(&mut self, request: &Request) -> Result<ResponseBody, UnrealscriptAdapterError> {
+    pub fn accept(
+        &mut self,
+        request: &Request,
+    ) -> Result<Option<ResponseBody>, UnrealscriptAdapterError> {
         log::info!("Got request {request:#?}");
         match &request.command {
-            Command::SetBreakpoints(args) => self.set_breakpoints(args),
-            Command::Threads => self.threads(),
-            Command::ConfigurationDone => Ok(ResponseBody::ConfigurationDone),
-            Command::Disconnect(args) => self.disconnect(args),
-            Command::StackTrace(args) => self.stack_trace(args),
-            Command::Scopes(args) => self.scopes(args),
-            Command::Variables(args) => self.variables(args),
-            Command::Evaluate(args) => self.evaluate(args),
-            Command::Pause(args) => self.pause(args),
-            Command::Continue(args) => self.go(args),
-            Command::Next(args) => self.next(args),
-            Command::StepIn(args) => self.step_in(args),
-            Command::StepOut(args) => self.step_out(args),
+            Command::SetBreakpoints(args) => Ok(Some(self.set_breakpoints(args)?)),
+            Command::Threads => Ok(Some(self.threads()?)),
+            Command::ConfigurationDone => Ok(None),
+            Command::Disconnect => {
+                self.disconnect()?;
+                Ok(None)
+            }
+            Command::StackTrace(args) => Ok(Some(self.stack_trace(args)?)),
+            Command::Scopes(args) => Ok(Some(self.scopes(args)?)),
+            Command::Variables(args) => Ok(Some(self.variables(args)?)),
+            Command::Evaluate(args) => Ok(Some(self.evaluate(args)?)),
+            Command::Pause => {
+                self.pause()?;
+                Ok(None)
+            }
+            Command::Continue => {
+                self.go()?;
+                Ok(None)
+            }
+            Command::Next => {
+                self.next()?;
+                Ok(None)
+            }
+            Command::StepIn => {
+                self.step_in()?;
+                Ok(None)
+            }
+            Command::StepOut => {
+                self.step_out()?;
+                Ok(None)
+            }
             cmd => {
                 log::error!("Unhandled command: {cmd:#?}");
                 Err(UnrealscriptAdapterError::UnhandledCommand(
-                    request.command.name().to_string(),
+                    request.command.to_string(),
                 ))
             }
         }
@@ -339,27 +360,23 @@ where
                         verified: true,
                         // Line number may require adjustment before sending back out to the
                         // client.
-                        line: Some(
-                            (new_bp.line + if self.config.one_based_lines { 0 } else { -1 }).into(),
-                        ),
-                        source: Some(class_info.to_source()),
-                        ..Default::default()
+                        line: (new_bp.line + if self.config.one_based_lines { 0 } else { -1 })
+                            .into(),
+                        source: class_info.to_source(),
                     });
                 }
             }
         }
 
-        Ok(ResponseBody::SetBreakpoints(
-            responses::SetBreakpointsResponse {
-                breakpoints: dap_breakpoints,
-            },
-        ))
+        Ok(ResponseBody::SetBreakpoints(SetBreakpointsResponseBody {
+            breakpoints: dap_breakpoints,
+        }))
     }
 
     /// Handle a threads request
     fn threads(&mut self) -> Result<ResponseBody, UnrealscriptAdapterError> {
         log::info!("Threads request");
-        Ok(ResponseBody::Threads(responses::ThreadsResponse {
+        Ok(ResponseBody::Threads(ThreadsResponseBody {
             threads: vec![Thread {
                 id: 1,
                 name: "main".to_string(),
@@ -461,21 +478,12 @@ where
         Some(Source {
             name: Some(entry.qualify()),
             path: Some(entry.file_name.clone()),
-            source_reference: None,
-            presentation_hint: None,
-            origin: None,
-            sources: None,
-            adapter_data: None,
-            checksums: None,
         })
     }
 
-    fn disconnect(
-        &mut self,
-        _args: &DisconnectArguments,
-    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+    fn disconnect(&mut self) -> Result<(), UnrealscriptAdapterError> {
         self.connection.disconnect()?;
-        Ok(ResponseBody::Disconnect)
+        Ok(())
     }
 
     /// Fetch the stack from the interface and send it to the client.
@@ -501,36 +509,26 @@ where
             start_frame,
             levels,
         })?;
-        Ok(ResponseBody::StackTrace(
-            dap::responses::StackTraceResponse {
-                stack_frames: response
-                    .frames
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, f)| {
-                        let canonical_name = f.qualified_name.to_uppercase();
-                        // Find the source file for this class.
-                        let source = self.translate_source(canonical_name);
+        Ok(ResponseBody::StackTrace(StackTraceResponseBody {
+            stack_frames: response
+                .frames
+                .into_iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let canonical_name = f.qualified_name.to_uppercase();
+                    // Find the source file for this class.
+                    let source = self.translate_source(canonical_name);
 
-                        StackFrame {
-                            // We'll use the index into the stack frame vector as the id
-                            id: i as i64 + start_frame as i64,
-                            name: f.function_name,
-                            source,
-                            line: f.line as i64,
-                            column: 0,
-                            end_line: None,
-                            end_column: None,
-                            can_restart: None,
-                            instruction_pointer_reference: None,
-                            module_id: None,
-                            presentation_hint: None,
-                        }
-                    })
-                    .collect(),
-                total_frames: None,
-            },
-        ))
+                    StackFrame {
+                        // We'll use the index into the stack frame vector as the id
+                        id: i as i64 + start_frame as i64,
+                        name: f.function_name,
+                        source,
+                        line: f.line as i64,
+                    }
+                })
+                .collect(),
+        }))
     }
 
     /// Return the scopes available in this suspended state. Unreal only supports two scopes: Local
@@ -547,47 +545,43 @@ where
             VariableReference::new(WatchKind::Local, frame_index, VariableIndex::SCOPE);
 
         // For the top-most frame (0) only, fetch all the watch data from the debugger.
-        let local_vars = if args.frame_id == 0 {
-            Some(
-                self.connection
-                    .watch_count(WatchKind::Local, VariableIndex::SCOPE)?
-                    .try_into()
-                    .or(Err(UnrealscriptAdapterError::LimitExceeded(
-                        "Too many variables".to_string(),
-                    )))?,
-            )
+        let local_var_info = if args.frame_id == 0 {
+            let child_count = self
+                .connection
+                .watch_count(WatchKind::Local, VariableIndex::SCOPE)?
+                .try_into()
+                .or(Err(UnrealscriptAdapterError::LimitExceeded(
+                    "Too many variables".to_string(),
+                )))?;
+            VariableReferenceInfo::new(locals_ref.to_int(), child_count, false)
         } else {
-            None
+            VariableReferenceInfo::new_childless(locals_ref.to_int())
         };
 
-        let global_vars = if args.frame_id == 0 {
-            Some(
-                self.connection
-                    .watch_count(WatchKind::Global, VariableIndex::SCOPE)?
-                    .try_into()
-                    .or(Err(UnrealscriptAdapterError::LimitExceeded(
-                        "Too many variables".to_string(),
-                    )))?,
-            )
+        let global_var_info = if args.frame_id == 0 {
+            let child_count = self
+                .connection
+                .watch_count(WatchKind::Global, VariableIndex::SCOPE)?
+                .try_into()
+                .or(Err(UnrealscriptAdapterError::LimitExceeded(
+                    "Too many variables".to_string(),
+                )))?;
+            VariableReferenceInfo::new(globals_ref.to_int(), child_count, false)
         } else {
-            None
+            VariableReferenceInfo::new_childless(globals_ref.to_int())
         };
 
-        Ok(ResponseBody::Scopes(responses::ScopesResponse {
+        Ok(ResponseBody::Scopes(ScopesResponseBody {
             scopes: vec![
                 Scope {
                     name: "self".to_string(),
-                    variables_reference: globals_ref.to_int(),
-                    named_variables: global_vars,
+                    variable_info: global_var_info,
                     expensive: false,
-                    ..Default::default()
                 },
                 Scope {
                     name: "locals".to_string(),
-                    variables_reference: locals_ref.to_int(),
-                    named_variables: local_vars,
+                    variable_info: local_var_info,
                     expensive: false,
-                    ..Default::default()
                 },
             ],
         }))
@@ -608,19 +602,14 @@ where
         ))?;
         let child_count = self.get_child_count(WatchKind::User, &var);
 
-        Ok(ResponseBody::Evaluate(EvaluateResponse {
+        Ok(ResponseBody::Evaluate(EvaluateResponseBody {
             result: var.value,
-            type_field: Some(var.ty),
-            presentation_hint: None,
-            variables_reference: VariableReference::new(
-                WatchKind::User,
-                FrameIndex::TOP_FRAME,
-                var.index,
-            )
-            .to_int(),
-            named_variables: if !var.is_array { child_count } else { None },
-            indexed_variables: if var.is_array { child_count } else { None },
-            memory_reference: None,
+            ty: Some(var.ty),
+            variable_info: VariableReferenceInfo::new(
+                VariableReference::new(WatchKind::User, FrameIndex::TOP_FRAME, var.index).to_int(),
+                child_count,
+                var.is_array,
+            ),
         }))
     }
 
@@ -669,86 +658,84 @@ where
             log::trace!("Invalidating frame {}", var.frame());
             self.client.send_event(Event {
                 body: EventBody::Invalidated(InvalidatedEventBody {
-                    areas: Some(vec![InvalidatedAreas::Stacks]),
-                    thread_id: None,
-                    stack_frame_id: Some(var.frame().into()),
+                    areas: vec![InvalidatedAreas::Stacks],
+                    frame_id: var.frame().into(),
                 }),
             })?;
         }
-        Ok(ResponseBody::Variables(VariablesResponse {
+        Ok(ResponseBody::Variables(VariablesResponseBody {
             variables: vars
                 .iter()
                 .map(|v| {
                     // If this variable is structured get the child count so we can put it in
                     // the appropriate field of the response.
                     let cnt = self.get_child_count(var.kind(), v);
+                    let variable_reference = if v.has_children {
+                        VariableReference::new(var.kind(), var.frame(), v.index).to_int()
+                    } else {
+                        0
+                    };
+
                     dap::types::Variable {
                         name: v.name.clone(),
                         value: v.value.clone(),
-                        type_field: if self.config.supports_variable_type {
+                        ty: if self.config.supports_variable_type {
                             Some(v.ty.clone())
                         } else {
                             None
                         },
-                        variables_reference: if v.has_children {
-                            VariableReference::new(var.kind(), var.frame(), v.index).to_int()
-                        } else {
-                            0
-                        },
-                        named_variables: if !v.is_array { cnt } else { None },
-                        indexed_variables: if v.is_array { cnt } else { None },
-                        ..Default::default()
+                        variable_info: VariableReferenceInfo::new(
+                            variable_reference,
+                            cnt,
+                            v.is_array,
+                        ),
                     }
                 })
                 .collect(),
         }))
     }
 
-    fn get_child_count(&mut self, kind: WatchKind, var: &Variable) -> Option<i64> {
+    fn get_child_count(&mut self, kind: WatchKind, var: &Variable) -> i64 {
         if var.has_children {
-            self.connection.watch_count(kind, var.index).ok().map(|c| {
-                c.try_into().unwrap_or_else(|_| {
+            match self.connection.watch_count(kind, var.index) {
+                Ok(count) => count.try_into().unwrap_or_else(|_| {
                     log::error!("Child count for var {} too large", var.name);
                     0
-                })
-            })
+                }),
+                Err(e) => {
+                    log::error!("Failed to retrieve watch count for {var:?}: {e:?}");
+                    0
+                }
+            }
         } else {
-            None
+            0
         }
     }
 
     /// "Pause": Tell the debugger to break as soon as possible.
-    fn pause(&mut self, _args: &PauseArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+    fn pause(&mut self) -> Result<(), UnrealscriptAdapterError> {
         self.connection.pause()?;
-        Ok(ResponseBody::Pause)
+        Ok(())
     }
 
-    fn go(&mut self, _args: &ContinueArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+    fn go(&mut self) -> Result<(), UnrealscriptAdapterError> {
         self.connection.go()?;
-        Ok(ResponseBody::Continue(ContinueResponse {
-            all_threads_continued: Some(true),
-        }))
+        Ok(())
     }
 
-    fn next(&mut self, _args: &NextArguments) -> Result<ResponseBody, UnrealscriptAdapterError> {
+    fn next(&mut self) -> Result<(), UnrealscriptAdapterError> {
         self.connection.next()?;
-        Ok(ResponseBody::Next)
+        Ok(())
     }
 
-    fn step_in(
-        &mut self,
-        _args: &StepInArguments,
-    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+    fn step_in(&mut self) -> Result<(), UnrealscriptAdapterError> {
         self.connection.step_in()?;
-        Ok(ResponseBody::StepIn)
+        Ok(())
     }
 
-    fn step_out(
-        &mut self,
-        _args: &StepOutArguments,
-    ) -> Result<ResponseBody, UnrealscriptAdapterError> {
+    fn step_out(&mut self) -> Result<(), UnrealscriptAdapterError> {
         self.connection.step_out()?;
-        Ok(ResponseBody::StepOut)
+        Ok(())
     }
 
     /// Process an event received from the interface, turning it into an event
@@ -756,21 +743,15 @@ where
     fn process_event(&mut self, evt: UnrealEvent) -> Option<Event> {
         match evt {
             UnrealEvent::Log(msg) => Some(Event {
-                body: events::EventBody::Output(OutputEventBody {
-                    category: Some(OutputEventCategory::Stdout),
+                body: EventBody::Output(OutputEventBody {
+                    category: OutputEventCategory::Stdout,
                     output: msg,
-                    ..Default::default()
                 }),
             }),
             UnrealEvent::Stopped => Some(Event {
-                body: events::EventBody::Stopped(StoppedEventBody {
+                body: EventBody::Stopped(StoppedEventBody {
                     reason: StoppedEventReason::Breakpoint,
-                    thread_id: Some(UNREAL_THREAD_ID),
-                    description: None,
-                    preserve_focus_hint: None,
-                    text: None,
-                    all_threads_stopped: None,
-                    hit_breakpoint_ids: None,
+                    thread_id: UNREAL_THREAD_ID,
                 }),
             }),
             UnrealEvent::Disconnect => {
@@ -989,15 +970,10 @@ mod tests {
         let mut adapter = make_test_adapter();
         let args = SetBreakpointsArguments {
             source: Source {
+                name: None,
                 path: Some(GOOD_PATH.to_string()),
-                ..Default::default()
             },
-            breakpoints: Some(vec![SourceBreakpoint {
-                line: 10,
-                ..Default::default()
-            }]),
-
-            ..Default::default()
+            breakpoints: Some(vec![SourceBreakpoint { line: 10 }]),
         };
         let _response = adapter.set_breakpoints(&args).unwrap();
         // Class cache should be keyed on UPCASED qualified names.
@@ -1015,21 +991,13 @@ mod tests {
         let mut adapter = make_test_adapter();
         let args = SetBreakpointsArguments {
             source: Source {
+                name: None,
                 path: Some(GOOD_PATH.to_string()),
-                ..Default::default()
             },
             breakpoints: Some(vec![
-                SourceBreakpoint {
-                    line: 10,
-                    ..Default::default()
-                },
-                SourceBreakpoint {
-                    line: 105,
-                    ..Default::default()
-                },
+                SourceBreakpoint { line: 10 },
+                SourceBreakpoint { line: 105 },
             ]),
-
-            ..Default::default()
         };
         let _response = adapter.set_breakpoints(&args).unwrap();
         // The entry in this map should have 2 breakpoints
@@ -1044,36 +1012,23 @@ mod tests {
         let mut adapter = make_test_adapter();
         let mut args = SetBreakpointsArguments {
             source: Source {
+                name: None,
                 path: Some(GOOD_PATH.to_string()),
-                ..Default::default()
             },
             breakpoints: Some(vec![
-                SourceBreakpoint {
-                    line: 10,
-                    ..Default::default()
-                },
-                SourceBreakpoint {
-                    line: 105,
-                    ..Default::default()
-                },
+                SourceBreakpoint { line: 10 },
+                SourceBreakpoint { line: 105 },
             ]),
-
-            ..Default::default()
         };
         adapter.set_breakpoints(&args).unwrap();
 
         // Set breakpoints in this class again.
         args = SetBreakpointsArguments {
             source: Source {
+                name: None,
                 path: Some(GOOD_PATH.to_string()),
-                ..Default::default()
             },
-            breakpoints: Some(vec![SourceBreakpoint {
-                line: 26,
-                ..Default::default()
-            }]),
-
-            ..Default::default()
+            breakpoints: Some(vec![SourceBreakpoint { line: 26 }]),
         };
         // this should delete the two existing breakpoints and replace them
         // with the new one.

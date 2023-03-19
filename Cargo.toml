@@ -3,5 +3,7 @@ members = ["crates/*", "integration_tests", "xtask"]
 
 [workspace.dependencies]
 common = { path = "./crates/common" }
+dap = { path = "./crates/dap" }
 interface = { path = "./crates/interface" }
 adapter = { path = "./crates/adapter" }
+

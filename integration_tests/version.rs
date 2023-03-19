@@ -1,5 +1,5 @@
 use common::{InitializeResponse, UnrealCommand, UnrealResponse, Version};
-use dap::{events::EventBody, types::OutputEventCategory};
+use dap::{events::EventBody, events::OutputEventCategory};
 use tokio_stream::StreamExt;
 
 mod fixture;
@@ -32,7 +32,7 @@ async fn equal_version() {
 
         // Then we'll get a terminated event because we closed the interface connection.
         let evt = erx.recv().await.unwrap();
-        assert!(matches!(evt.body, EventBody::Terminated(_)));
+        assert!(matches!(evt.body, EventBody::Terminated));
     });
 
     adapter
@@ -75,7 +75,7 @@ async fn larger_major() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
+                assert!(matches!(o.category, OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -86,7 +86,7 @@ async fn larger_major() {
 
         // Then we'll get a terminated event because we closed the interface connection.
         let evt = erx.recv().await.unwrap();
-        assert!(matches!(evt.body, EventBody::Terminated(_)));
+        assert!(matches!(evt.body, EventBody::Terminated));
     });
 
     adapter
@@ -129,7 +129,7 @@ async fn larger_minor() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
+                assert!(matches!(o.category, OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -140,7 +140,7 @@ async fn larger_minor() {
 
         // Then we'll get a terminated event because we closed the interface connection.
         let evt = erx.recv().await.unwrap();
-        assert!(matches!(evt.body, EventBody::Terminated(_)));
+        assert!(matches!(evt.body, EventBody::Terminated));
     });
 
     adapter
@@ -183,7 +183,7 @@ async fn larger_patch() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
+                assert!(matches!(o.category, OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -194,7 +194,7 @@ async fn larger_patch() {
 
         // Then we'll get a terminated event because we closed the interface connection.
         let evt = erx.recv().await.unwrap();
-        assert!(matches!(evt.body, EventBody::Terminated(_)));
+        assert!(matches!(evt.body, EventBody::Terminated));
     });
 
     adapter
@@ -237,7 +237,7 @@ async fn smaller_major() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
+                assert!(matches!(o.category, OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -248,7 +248,7 @@ async fn smaller_major() {
 
         // Then we'll get a terminated event because we closed the interface connection.
         let evt = erx.recv().await.unwrap();
-        assert!(matches!(evt.body, EventBody::Terminated(_)));
+        assert!(matches!(evt.body, EventBody::Terminated));
     });
 
     adapter
@@ -291,7 +291,7 @@ async fn smaller_minor() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
+                assert!(matches!(o.category, OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -302,7 +302,7 @@ async fn smaller_minor() {
 
         // Then we'll get a terminated event because we closed the interface connection.
         let evt = erx.recv().await.unwrap();
-        assert!(matches!(evt.body, EventBody::Terminated(_)));
+        assert!(matches!(evt.body, EventBody::Terminated));
     });
 
     adapter
@@ -345,7 +345,7 @@ async fn smaller_patch() {
         let evt = erx.recv().await.unwrap();
         match evt.body {
             EventBody::Output(o) => {
-                assert!(matches!(o.category.unwrap(), OutputEventCategory::Console));
+                assert!(matches!(o.category, OutputEventCategory::Console));
             }
             e => panic!("Expected output event for version mismatch but got {e:?}"),
         };
@@ -356,7 +356,7 @@ async fn smaller_patch() {
 
         // Then we'll get a terminated event because we closed the interface connection.
         let evt = erx.recv().await.unwrap();
-        assert!(matches!(evt.body, EventBody::Terminated(_)));
+        assert!(matches!(evt.body, EventBody::Terminated));
     });
 
     adapter

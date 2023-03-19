@@ -11,10 +11,9 @@ use std::io::{Error, ErrorKind};
 
 use bytes::BytesMut;
 use dap::{
-    events::EventProtocolMessage,
-    prelude::Event,
+    events::{Event, EventMessage},
     requests::Request,
-    responses::{Response, ResponseProtocolMessage},
+    responses::{Response, ResponseMessage},
 };
 use futures::{executor, stream::Next, Stream, StreamExt};
 use memmem::{Searcher, TwoWaySearcher};
@@ -152,7 +151,7 @@ where
     }
 
     fn respond(&mut self, response: Response) -> Result<(), Error> {
-        let response_message = ResponseProtocolMessage {
+        let response_message = ResponseMessage {
             seq: self.next_seq(),
             response,
         };
@@ -162,7 +161,7 @@ where
     }
 
     fn send_event(&mut self, event: Event) -> Result<(), Error> {
-        let event_message = EventProtocolMessage {
+        let event_message = EventMessage {
             seq: self.next_seq(),
             event,
         };
@@ -287,10 +286,10 @@ mod tests {
     use std::io::Cursor;
 
     use dap::{
-        events::{EventBody, OutputEventBody},
+        events::{EventBody, OutputEventBody, OutputEventCategory},
         requests::Command,
         responses::ResponseBody,
-        types::{OutputEventCategory, Scope},
+        types::{Scope, VariableReferenceInfo},
     };
 
     use super::*;
@@ -411,30 +410,22 @@ mod tests {
         let output = Cursor::new(&mut buf);
         let mut client = AsyncClientImpl::new(input, output);
         let response = Response {
-            command: "scopes",
+            command: "scopes".to_string(),
             request_seq: 1,
             success: true,
             message: None,
-            body: Some(ResponseBody::Scopes(dap::responses::ScopesResponse {
+            body: Some(ResponseBody::Scopes(dap::responses::ScopesResponseBody {
                 scopes: vec![Scope {
                     name: "Globals".to_string(),
-                    column: None,
-                    end_column: None,
-                    line: None,
-                    end_line: None,
                     expensive: false,
-                    presentation_hint: None,
-                    variables_reference: 1,
-                    named_variables: None,
-                    indexed_variables: None,
-                    source: None,
+                    variable_info: VariableReferenceInfo::new_childless(1),
                 }],
             })),
         };
         client.respond(response).unwrap();
         let out = std::str::from_utf8(&buf).unwrap();
         assert_eq!(out,
-        "Content-Length: 299\r\n\r\n{\"type\":\"response\",\"seq\":1,\"request_seq\":1,\"success\":true,\"command\":\"scopes\",\"body\":{\"scopes\":[{\"name\":\"Globals\",\"presentationHint\":null,\"variablesReference\":1,\"namedVariables\":null,\"indexedVariables\":null,\"expensive\":false,\"source\":null,\"line\":null,\"column\":null,\"endLine\":null,\"endColumn\":null}]}}");
+        "Content-Length: 203\r\n\r\n{\"type\":\"response\",\"seq\":1,\"request_seq\":1,\"success\":true,\"command\":\"scopes\",\"body\":{\"scopes\":[{\"name\":\"Globals\",\"variablesReference\":1,\"namedVariables\":null,\"indexedVariables\":null,\"expensive\":false}]}}");
     }
 
     #[test]
@@ -446,19 +437,13 @@ mod tests {
         let mut client = AsyncClientImpl::new(input, output);
         let event = Event {
             body: EventBody::Output(OutputEventBody {
-                category: Some(OutputEventCategory::Stdout),
+                category: OutputEventCategory::Stdout,
                 output: "A log line".to_string(),
-                group: None,
-                variables_reference: None,
-                source: None,
-                line: None,
-                column: None,
-                data: None,
             }),
         };
         client.send_event(event).unwrap();
         let out = std::str::from_utf8(&buf).unwrap();
         assert_eq!(out,
-        "Content-Length: 183\r\n\r\n{\"type\":\"event\",\"seq\":1,\"event\":\"output\",\"body\":{\"category\":\"stdout\",\"output\":\"A log line\",\"group\":null,\"variablesReference\":null,\"source\":null,\"line\":null,\"column\":null,\"data\":null}}");
+        "Content-Length: 92\r\n\r\n{\"seq\":1,\"type\":\"event\",\"event\":\"output\",\"body\":{\"category\":\"stdout\",\"output\":\"A log line\"}}");
     }
 }

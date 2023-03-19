@@ -17,7 +17,10 @@ macro_rules! expect_response {
     ($e:expr, $p:path) => {
         match $e {
             Ok($p(x)) => Ok(x),
-            Ok(_) => Err(Error::new(ErrorKind::Other, "Protocol Error")),
+            Ok(r) => Err(Error::new(
+                ErrorKind::Other,
+                format!("Protocol Error: {r:?}"),
+            )),
             Err(e) => Err(e),
         }
     };
@@ -144,7 +147,10 @@ pub trait Connection: Send {
         match self.next_response() {
             Ok(UnrealResponse::Variables(vars)) => Ok((vars, false)),
             Ok(UnrealResponse::DeferredVariables(vars)) => Ok((vars, true)),
-            Ok(_) => Err(Error::new(ErrorKind::Other, "Protocol Error")),
+            Ok(r) => Err(Error::new(
+                ErrorKind::Other,
+                format!("Protocol Error: {r:?}"),
+            )),
             Err(e) => Err(e),
         }
     }

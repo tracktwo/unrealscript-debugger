@@ -9,7 +9,7 @@
 //
 // - Fix language encodings
 
-use dap::responses::ErrorMessage;
+use dap::responses::MessageResponseBody;
 use thiserror::Error;
 pub mod async_client;
 pub mod client_config;
@@ -86,8 +86,8 @@ impl UnrealscriptAdapterError {
 
     /// Convet an UnrealScriptAdapterError to a DAP error message suitable
     /// for use as a body in an error response.
-    pub fn to_error_message(&self) -> ErrorMessage {
-        ErrorMessage {
+    pub fn to_error_message(&self) -> MessageResponseBody {
+        MessageResponseBody {
             id: self.id(),
             format: self.to_string(),
             show_user: true,

@@ -9,13 +9,10 @@ use std::process::Child;
 
 use common::DEFAULT_PORT;
 use dap::{
-    requests::{
-        AttachRequestArguments, Command, InitializeArguments, LaunchRequestArguments, Request,
-    },
+    requests::{AttachArguments, Command, InitializeArguments, LaunchArguments, Request},
     responses::{Response, ResponseBody},
     types::Capabilities,
 };
-use serde_json::Value;
 use tokio::select;
 
 use crate::{
@@ -89,16 +86,16 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                                 Command::Initialize(args) => self.initialize(&request, args)?,
                                 Command::Attach(args) => return self.attach(&request, args).await,
                                 Command::Launch(args) => return self.launch(&request, args).await,
-                                Command::Disconnect(_) => {
+                                Command::Disconnect => {
                                     log::info!("Received disconnect message during connection phase.");
                                     return Err(DisconnectedAdapterError::NoConnection(self));
                                 },
                                 // No other requests are expected in the disconnected state.
                                 cmd => {
-                                    log::error!("Unexpected command {} in disconnected state.", cmd.name().to_string());
+                                    log::error!("Unexpected command {} in disconnected state.", cmd.to_string());
                                     //
-                                    self.client.respond(Response::make_error(&request,
-                                            UnrealscriptAdapterError::UnhandledCommand(cmd.name().to_string()).to_error_message()
+                                    self.client.respond(Response::make_error(&request, "Unhandled Command".to_string(),
+                                            UnrealscriptAdapterError::UnhandledCommand(cmd.to_string()).to_error_message()
                                     ))?;
                                 }
                             }
@@ -133,10 +130,8 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         self.client.respond(Response::make_success(
             req,
             ResponseBody::Initialize(Some(Capabilities {
-                supports_configuration_done_request: Some(true),
-                supports_delayed_stack_trace_loading: Some(true),
-                supports_value_formatting_options: Some(false),
-                ..Default::default()
+                supports_configuration_done_request: true,
+                supports_delayed_stack_trace_loading: true,
             })),
         ))?;
         Ok(())
@@ -167,18 +162,17 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     async fn attach(
         mut self,
         req: &Request,
-        args: &AttachRequestArguments,
+        args: &AttachArguments,
     ) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
         log::info!("Attach request");
-        let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
-        self.config.source_roots = Self::extract_source_roots(&args.other).unwrap_or_default();
-        self.config.enable_stack_hack = Self::extract_stack_hack(&args.other).unwrap_or(true);
+        let port = args.port.unwrap_or(DEFAULT_PORT);
+        self.config.source_roots = args.source_roots.clone().unwrap_or_default();
+        self.config.enable_stack_hack = args.enable_stack_hack.unwrap_or(true);
         match self.connect_to_interface(port).await {
             Ok(connection) => {
                 // Connection succeeded: Respond with a success response and return
                 // the conneted adapter.
-                self.client
-                    .respond(Response::make_success(req, ResponseBody::Attach))?;
+                self.client.respond(Response::make_ack(req))?;
 
                 Ok(UnrealscriptAdapter::new(
                     self.client,
@@ -189,8 +183,11 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
             }
             Err(e) => {
                 // Connection failed.
-                self.client
-                    .respond(Response::make_error(req, e.to_error_message()))?;
+                self.client.respond(Response::make_error(
+                    req,
+                    "Connection Failed".to_string(),
+                    e.to_error_message(),
+                ))?;
                 Err(DisconnectedAdapterError::NoConnection(self))
             }
         }
@@ -199,14 +196,16 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     /// Spawn the debuggee process according to the arguments given.
     fn spawn_debuggee(
         &self,
-        args: &LaunchRequestArguments,
+        args: &LaunchArguments,
         auto_debug: bool,
     ) -> Result<Child, UnrealscriptAdapterError> {
         // Find the program to run
-        let program =
-            Self::extract_program(&args.other).ok_or(UnrealscriptAdapterError::NoProgram)?;
+        let program = args
+            .program
+            .as_ref()
+            .ok_or(UnrealscriptAdapterError::NoProgram)?;
 
-        let program_args = Self::extract_args(&args.other);
+        let program_args = args.arguments.as_ref();
 
         let mut command = &mut std::process::Command::new(program);
         if let Some(a) = program_args {
@@ -256,7 +255,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     async fn launch(
         mut self,
         req: &Request,
-        args: &LaunchRequestArguments,
+        args: &LaunchArguments,
     ) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
         // Unless instructed otherwise we're going to debug the launched process, so pass
         // '-autoDebug' and try to connect. If 'no_debug' is 'true' then we're just launching and
@@ -269,16 +268,14 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
             Ok(child) => {
                 // If we're auto-debugging we can now connect to the interface.
                 if auto_debug {
-                    let port = Self::extract_port(&args.other).unwrap_or(DEFAULT_PORT);
+                    let port = args.port.unwrap_or(DEFAULT_PORT);
                     match self.connect_to_interface(port).await {
                         Ok(connection) => {
                             // Send a response ack for the launch request.
-                            self.client
-                                .respond(Response::make_success(req, ResponseBody::Launch))?;
+                            self.client.respond(Response::make_ack(req))?;
                             self.config.source_roots =
-                                Self::extract_source_roots(&args.other).unwrap_or_default();
-                            self.config.enable_stack_hack =
-                                Self::extract_stack_hack(&args.other).unwrap_or(true);
+                                args.source_roots.clone().unwrap_or_default();
+                            self.config.enable_stack_hack = args.enable_stack_hack.unwrap_or(true);
 
                             Ok(UnrealscriptAdapter::new(
                                 self.client,
@@ -290,8 +287,11 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                         Err(e) => {
                             // We launched, but failed to connect.
                             log::error!("Successfully launched program but failed to connect: {e}");
-                            self.client
-                                .respond(Response::make_error(req, e.to_error_message()))?;
+                            self.client.respond(Response::make_error(
+                                req,
+                                "Connection failed".to_string(),
+                                e.to_error_message(),
+                            ))?;
                             Err(DisconnectedAdapterError::NoConnection(self))
                         }
                     }
@@ -299,53 +299,19 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                     // We launched, but were not asked to connect. Send a success response to the
                     // client, but stay in the disconnected state.
                     log::info!("Launch request succeeded but autodebug is disabled. Remaining disconnected.");
-                    self.client
-                        .respond(Response::make_success(req, ResponseBody::Launch))?;
+                    self.client.respond(Response::make_ack(req))?;
                     Err(DisconnectedAdapterError::NoConnection(self))
                 }
             }
             Err(e) => {
                 // We failed to launch the debuggee. Send an error response
-                self.client
-                    .respond(Response::make_error(req, e.to_error_message()))?;
+                self.client.respond(Response::make_error(
+                    req,
+                    "Launch Failed".to_string(),
+                    e.to_error_message(),
+                ))?;
                 Err(DisconnectedAdapterError::NoConnection(self))
             }
         }
-    }
-
-    /// Extract the port number from a launch/attach arguments value map.
-    fn extract_port(value: &Option<Value>) -> Option<u16> {
-        value.as_ref()?["port"].as_i64()?.try_into().ok()
-    }
-
-    /// Extract the program from launch arguments.
-    fn extract_program(value: &Option<Value>) -> Option<&str> {
-        value.as_ref()?["program"].as_str()
-    }
-
-    /// Extract the enableStackHack value from launch/attach arguments.
-    fn extract_stack_hack(value: &Option<Value>) -> Option<bool> {
-        value.as_ref()?["enableStackHack"].as_bool()
-    }
-
-    /// Extract the argument list from launch arguments.
-    fn extract_args(value: &Option<Value>) -> Option<impl Iterator<Item = &str>> {
-        let arr = value.as_ref()?["args"].as_array()?;
-        Some(
-            arr.iter()
-                .filter(|e| e.is_string())
-                .map(|e| e.as_str().unwrap()),
-        )
-    }
-
-    /// Extract the source roots list from the launch/attach arguments.
-    fn extract_source_roots(value: &Option<Value>) -> Option<Vec<String>> {
-        let arr = value.as_ref()?["sourceRoots"].as_array()?;
-        Some(
-            arr.iter()
-                .filter(|e| e.is_string())
-                .map(|e| e.as_str().unwrap().to_string())
-                .collect(),
-        )
     }
 }
