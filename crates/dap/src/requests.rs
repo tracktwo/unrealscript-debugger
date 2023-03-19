@@ -52,7 +52,7 @@ pub struct AttachArguments {
 pub struct EvaluateArguments {
     pub expression: String,
     #[serde(rename = "frameId")]
-    pub frame_id: i64,
+    pub frame_id: Option<i64>,
 }
 
 #[derive(Deserialize, Debug)]

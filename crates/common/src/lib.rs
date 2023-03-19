@@ -287,8 +287,8 @@ pub enum UnrealCommand {
     /// a structured variable).
     Variables(WatchKind, FrameIndex, VariableIndex, usize, usize),
 
-    /// Evaluate a given variable expression
-    Evaluate(String),
+    /// Evaluate a given variable expression in the context of the given frame.
+    Evaluate(FrameIndex, String),
 
     /// Break as soon as possible
     Pause,

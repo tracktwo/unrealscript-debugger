@@ -104,7 +104,6 @@ pub extern "C" fn AddAWatch(
     name: *const c_char,
     value: *const c_char,
 ) -> i32 {
-    log::trace!("AddAWatch {kind} {parent}");
     let mut hnd = DEBUGGER.lock().unwrap();
     let dbg = hnd.as_mut().unwrap();
     dbg.add_watch(

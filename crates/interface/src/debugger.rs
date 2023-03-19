@@ -57,12 +57,17 @@ pub struct Debugger {
 }
 
 #[derive(Debug)]
-struct PendingVariableRequest {
-    kind: WatchKind,
-    frame: FrameIndex,
-    parent: VariableIndex,
-    start: usize,
-    count: usize,
+enum PendingVariableRequest {
+    Variables(WatchKind, FrameIndex, VariableIndex, usize, usize),
+    UserWatch,
+    // kind: WatchKind,
+    // frame: FrameIndex,
+    // parent: VariableIndex,
+    // start: usize,
+    // count: usize,
+    // // If true then this was registered for a new user watch, otherwise it was
+    // // registered as part of a stack switch for a variables request.
+    // for_new_user_watch: bool,
 }
 
 /// A variable watch.
@@ -256,9 +261,8 @@ impl Debugger {
                 );
 
                 // If this is a request for a variable not in our current frame then switch frames
-                // and return a deferred response. User watches never require a frame switch,
-                // because they're provided on each frame.
-                if matches!(kind, WatchKind::User) && frame != self.current_frame {
+                // and return a deferred response.
+                if frame != self.current_frame {
                     // We should not be processing new commands while a variable request is
                     // outstanding. This should never happen, but if it does return an empty
                     // variables list -- hopefully we can recover.
@@ -278,13 +282,9 @@ impl Debugger {
                         return Ok(CommandAction::Nothing);
                     }
 
-                    self.pending_variable_request = Some(PendingVariableRequest {
-                        kind,
-                        frame,
-                        parent,
-                        start,
-                        count,
-                    });
+                    self.pending_variable_request = Some(PendingVariableRequest::Variables(
+                        kind, frame, parent, start, count,
+                    ));
 
                     // Convert the frame index into the format unreal is expecting.
                     let str = format!("changestack {}", frame_id);
@@ -296,16 +296,14 @@ impl Debugger {
                 self.send_variable_response(kind, parent, start, count, false)?;
                 Ok(CommandAction::Nothing)
             }
-            UnrealCommand::Evaluate(expr) => {
-                let str = format!("addwatch {expr}");
-                log::trace!("handle_command: {str}");
-
+            UnrealCommand::Evaluate(frame, expr) => {
                 // Check to see if we have a user watch already registered for this expression.
                 // Each user watch is registered as a root variable, so we only need to check
                 // children of the root.
-                if !self.user_watches.is_empty() {
+                if frame == self.current_frame && !self.user_watches.is_empty() {
                     for idx in &self.user_watches[0].children {
                         if self.user_watches[*idx].name == expr {
+                            log::trace!("Found existing user watch for {expr}");
                             self.send_response(UnrealResponse::Variables(vec![self.user_watches
                                 [*idx]
                                 .to_variable(*idx)]))?;
@@ -317,13 +315,10 @@ impl Debugger {
                 // No existing watch, so create one and register a pending variable request to
                 // wait for it to come in.
                 log::trace!("Registering pending request for new user watch {expr}");
-                self.pending_variable_request = Some(PendingVariableRequest {
-                    kind: WatchKind::User,
-                    frame: self.current_frame,
-                    parent: VariableIndex::SCOPE,
-                    start: 0,
-                    count: 0,
-                });
+                // TODO we could put the frame index here too?
+                self.pending_variable_request = Some(PendingVariableRequest::UserWatch);
+                let str = format!("addwatch {expr}");
+                log::trace!("handle_command: {str}");
                 Ok(CommandAction::Callback(self.encode_string(&str)))
             }
             UnrealCommand::Pause => {
@@ -581,16 +576,20 @@ impl Debugger {
         // this kind.
         if let WatchKind::User = kind {
             if let Some(req) = self.pending_variable_request.take() {
-                // Update the current stack frame to represent the new state.
-                self.current_frame = req.frame;
+                match req {
+                    PendingVariableRequest::Variables(kind, frame, parent, start, count) => {
+                        // Update the current stack frame to represent the new state.
+                        self.current_frame = frame;
 
-                // If the deferred request was for a variables list then we will have indexing
-                // information (parent, start, count) to return a list of variables as per normal.
-                // If this request was for a newly-added user watch then we don't have any of that,
-                // and instead we expect the new watch to be the last element in the user watch
-                // list.
-                match req.kind {
-                    WatchKind::User => {
+                        // Send the response to the adapter so it can proceed.
+                        self.send_variable_response(kind, parent, start, count, true)
+                            .unwrap_or_else(|_| {
+                                log::error!(
+                                    "Failed to send response for deferred variable request"
+                                );
+                            });
+                    }
+                    PendingVariableRequest::UserWatch => {
                         // The new user watch will be the last one added to the user watchlist,
                         // so it's the last child of the root.
                         let var = self.user_watches.get(0).and_then(|n| {
@@ -609,15 +608,6 @@ impl Debugger {
                             .unwrap_or_else(|_| {
                                 log::error!("Failed to send response for user watch");
                             });
-                    }
-                    _ => {
-                        // Send the response to the adapter so it can proceed.
-                        self.send_variable_response(
-                            req.kind, req.parent, req.start, req.count, true,
-                        )
-                        .unwrap_or_else(|_| {
-                            log::error!("Failed to send response for deferred variable request");
-                        });
                     }
                 }
 
@@ -829,18 +819,29 @@ impl Debugger {
 
     /// Set the current line.
     pub fn goto_line(&mut self, line: i32) {
-        // If we have a pending variable request then this is the line for our frame.
-        if let Some(var) = &self.pending_variable_request {
-            // Set the line number in the frame we are moving to.
-            let mut index: usize = self.callstack.len() - 1;
-            index -= <FrameIndex as Into<usize>>::into(var.frame);
-            log::trace!("Setting line number for frame {} to {}", index, line);
-            self.callstack[index].line = line;
-        } else {
-            // No pending variable request. This goto line is due to the debugger stopping,
-            // and the line is associated with whatever the last frame will be. Record this
-            // in the debugger object and the add stack frame calls will use it.
-            self.current_line = line;
+        // The line signal is only processed if we aren't using the stack hack. With the
+        // stack hack enabled we have full line info for every stack frame.
+        //
+        // If we don't have a stack hack enabled then we only get line information when
+        // we break (for the topmost stack) or switch stacks due to a pending variable
+        // request. If this line signal comes during a pending variable request then we
+        // now know the line number for the stack frame we're switching to.
+        if self.stack_hack.is_none() {
+            // If we have a pending variable request then this is the line for our frame.
+            if let Some(PendingVariableRequest::Variables(_, frame, _, _, _)) =
+                &self.pending_variable_request
+            {
+                // Set the line number in the frame we are moving to.
+                let mut index: usize = self.callstack.len() - 1;
+                index -= <FrameIndex as Into<usize>>::into(*frame);
+                log::trace!("Setting line number for frame {} to {}", index, line);
+                self.callstack[index].line = line;
+            } else {
+                // No pending variable request. This goto line is due to the debugger stopping,
+                // and the line is associated with whatever the last frame will be. Record this
+                // in the debugger object and the add stack frame calls will use it.
+                self.current_line = line;
+            }
         }
     }
 

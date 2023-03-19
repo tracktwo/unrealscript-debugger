@@ -120,8 +120,8 @@ pub trait Connection: Send {
     }
 
     /// Evaluate the given string in the current debugger context.
-    fn evaluate(&mut self, expr: &str) -> Result<Vec<Variable>, Error> {
-        self.send_command(UnrealCommand::Evaluate(expr.to_string()))?;
+    fn evaluate(&mut self, frame: FrameIndex, expr: &str) -> Result<Vec<Variable>, Error> {
+        self.send_command(UnrealCommand::Evaluate(frame, expr.to_string()))?;
         match self.next_response() {
             Ok(UnrealResponse::Variables(vars)) => Ok(vars),
             Ok(UnrealResponse::DeferredVariables(vars)) => Ok(vars),

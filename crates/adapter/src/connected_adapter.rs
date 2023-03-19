@@ -592,7 +592,14 @@ where
         &mut self,
         args: &EvaluateArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        let mut var = self.connection.evaluate(&args.expression)?;
+        let frame_index = match args.frame_id {
+            Some(f) => FrameIndex::create(f).or(Err(UnrealscriptAdapterError::LimitExceeded(
+                "Frame index out of range".to_string(),
+            )))?,
+            None => FrameIndex::TOP_FRAME,
+        };
+
+        let mut var = self.connection.evaluate(frame_index, &args.expression)?;
 
         // We may get back a vector of length 0, which means that something has gone wrong with evaluating this
         // expression. This is not a typical error, passing an invalid expression will usually
@@ -601,13 +608,14 @@ where
         let var = var.pop().ok_or(UnrealscriptAdapterError::WatchError(
             args.expression.clone(),
         ))?;
+
         let child_count = self.get_child_count(WatchKind::User, &var);
 
         Ok(ResponseBody::Evaluate(EvaluateResponseBody {
             result: var.value,
             ty: Some(var.ty),
             variable_info: VariableReferenceInfo::new(
-                VariableReference::new(WatchKind::User, FrameIndex::TOP_FRAME, var.index).to_int(),
+                VariableReference::new(WatchKind::User, frame_index, var.index).to_int(),
                 child_count,
                 var.is_array,
             ),
@@ -885,7 +893,7 @@ mod tests {
             unreachable!()
         }
 
-        fn evaluate(&mut self, _expr: &str) -> Result<Vec<Variable>, Error> {
+        fn evaluate(&mut self, _frame: FrameIndex, _expr: &str) -> Result<Vec<Variable>, Error> {
             unreachable!()
         }
 
