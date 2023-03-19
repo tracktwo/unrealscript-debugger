@@ -203,6 +203,11 @@ async fn handle_connection(
                         match dispatch_command(command) {
                             CommandAction::Nothing => (),
                             CommandAction::Callback(vec) => (cb)(vec.as_ptr()),
+                            CommandAction::MultiStepCallback(vec) => {
+                                for v in vec {
+                                    (cb)(v.as_ptr());
+                                }
+                            }
                         }
                     },
                     None => break,

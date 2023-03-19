@@ -60,14 +60,7 @@ pub struct Debugger {
 enum PendingVariableRequest {
     Variables(WatchKind, FrameIndex, VariableIndex, usize, usize),
     UserWatch,
-    // kind: WatchKind,
-    // frame: FrameIndex,
-    // parent: VariableIndex,
-    // start: usize,
-    // count: usize,
-    // // If true then this was registered for a new user watch, otherwise it was
-    // // registered as part of a stack switch for a variables request.
-    // for_new_user_watch: bool,
+    CrossFrameUserWatch,
 }
 
 /// A variable watch.
@@ -133,6 +126,9 @@ pub enum CommandAction {
     /// Send the given command string to the Unreal callback. Must be a null terminated
     /// ascii string.
     Callback(Vec<u8>),
+    /// Send multiple commands to the unreal callback, one after the other. Each entry
+    /// is a null terminated ascii string.
+    MultiStepCallback(Vec<Vec<u8>>),
 }
 
 impl Debugger {
@@ -313,13 +309,27 @@ impl Debugger {
                 }
 
                 // No existing watch, so create one and register a pending variable request to
-                // wait for it to come in.
-                log::trace!("Registering pending request for new user watch {expr}");
-                // TODO we could put the frame index here too?
-                self.pending_variable_request = Some(PendingVariableRequest::UserWatch);
-                let str = format!("addwatch {expr}");
-                log::trace!("handle_command: {str}");
-                Ok(CommandAction::Callback(self.encode_string(&str)))
+                // wait for it to come in. If this request is for a different frame then
+                // we need to do a two-step process to first switch the stack frame to the desired
+                // one and then add the watch.
+                if frame != self.current_frame {
+                    log::trace!("Registering cross-frame pending request for new user watch {expr} in frame {frame}");
+                    self.pending_variable_request =
+                        Some(PendingVariableRequest::CrossFrameUserWatch);
+                    let change_stack = format!("changestack {frame}");
+                    let add_watch = format!("addwatch {expr}");
+                    Ok(CommandAction::MultiStepCallback(vec![
+                        self.encode_string(&change_stack),
+                        self.encode_string(&add_watch),
+                    ]))
+                } else {
+                    log::trace!("Registering pending request for new user watch {expr}");
+                    // TODO we could put the frame index here too?
+                    self.pending_variable_request = Some(PendingVariableRequest::UserWatch);
+                    let str = format!("addwatch {expr}");
+                    log::trace!("handle_command: {str}");
+                    Ok(CommandAction::Callback(self.encode_string(&str)))
+                }
             }
             UnrealCommand::Pause => {
                 log::trace!("Pause");
@@ -608,6 +618,12 @@ impl Debugger {
                             .unwrap_or_else(|_| {
                                 log::error!("Failed to send response for user watch");
                             });
+                    }
+                    PendingVariableRequest::CrossFrameUserWatch => {
+                        // This is the first step of a two-stage process to switch stacks and then
+                        // register a user watch. No data is sent after the first step, we just
+                        // replace the state with a UserWatch, we'll get another unlock after that.
+                        self.pending_variable_request = Some(PendingVariableRequest::UserWatch);
                     }
                 }
 
