@@ -379,7 +379,6 @@ dependencies = [
  "log",
  "pkg-version",
  "serde",
- "textcode",
  "thiserror",
  "tokio",
  "tokio-serde",
@@ -815,12 +814,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
 ]
-
-[[package]]
-name = "textcode"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "383d5314770f8b7b2129936c78638db0dad1cfc9e7ef78706d4ccf9f0a0677fd"
 
 [[package]]
 name = "thiserror"

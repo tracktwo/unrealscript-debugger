@@ -6,10 +6,11 @@
 use futures::executor;
 use std::ffi::{c_char, CStr};
 use std::thread::JoinHandle;
-use textcode::iso8859_1;
 use thiserror::Error;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
+use winapi::um::stringapiset::{MultiByteToWideChar, WideCharToMultiByte};
+use winapi::um::winnls::{CP_ACP, CP_UTF8};
 
 use common::{
     Breakpoint, FrameIndex, InitializeResponse, StackTraceRequest, StackTraceResponse,
@@ -21,6 +22,9 @@ use crate::stackhack::{StackHack, DEFAULT_MODEL};
 use crate::{INTERFACE_VERSION, VARIABLE_REQUST_CONDVAR};
 
 const MAGIC_DISCONNECT_STRING: &str = "Log: Detaching UnrealScript Debugger (currently detached)";
+
+const DEFAULT_WIDECHAR_CAPACITY: usize = 512;
+const DEFAULT_NARROW_CAPACITY: usize = 1024;
 
 /// A struct representing the debugger state.
 pub struct Debugger {
@@ -53,7 +57,15 @@ pub struct Debugger {
     // could result in more variable requests.
     pending_variable_request: Option<PendingVariableRequest>,
 
+    // The optional stack hack implementation to use. If none then we will not have
+    // line numbers for any stack frame other than the top-most.
     stack_hack: Option<StackHack>,
+
+    // A widechar buffer used for encoding and decoding strings.
+    widechar_buffer: Vec<u16>,
+
+    // A narrow char buffer for encoding and decoding strings.
+    narrow_buffer: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -172,6 +184,8 @@ impl Debugger {
             current_frame: FrameIndex::TOP_FRAME,
             pending_variable_request: None,
             stack_hack: None,
+            widechar_buffer: Vec::with_capacity(DEFAULT_WIDECHAR_CAPACITY),
+            narrow_buffer: Vec::with_capacity(DEFAULT_NARROW_CAPACITY),
         }
     }
 
@@ -873,7 +887,12 @@ impl Debugger {
     /// Decompose an Unreal variable watch name into a name, type, and whether this
     /// type is an array.
     fn decompose_name(&mut self, ptr: *const c_char) -> (String, Option<String>, Option<bool>) {
-        let str = iso8859_1::decode_to_string(make_cstr(ptr).to_bytes());
+        let str = std::str::from_utf8(make_cstr(ptr).to_bytes())
+            .unwrap_or_else(|_| {
+                log::error!("Unreal variable name and type must be ascii");
+                "<unknown>"
+            })
+            .to_string();
 
         // The name string is of the form "Name ( Ty,addr1,addr2 )".
         // If the type is a dynamic array the type will be "Array". If it's
@@ -915,15 +934,95 @@ impl Debugger {
         (str, None, None)
     }
 
-    /// Decode an Unreal-encoded string to UTF-8.
+    /// Decode an Unreal-encoded string to UTF-8. The encoding used in this string
+    /// is dependent on the system configuration.
+    ///
+    // The pointer we get is to a string that Unreal converted to a narrow
+    // string with WideCharToMultiByte using the default system codepage. Converting
+    // this to utf8 is not trivial because we need to account for whatever the system
+    // default codepage is. This is most easily done by using the same Windows APIs
+    // Unreal used: convert the string back to widechar with the same default codepage
+    // (which should be a round-trip that doesn't alter the representation) and then
+    // ask Windows to do the utf8 conversion for us.
     fn decode_string(&mut self, ptr: *const c_char) -> String {
+        // Determine the string length.
         let str = make_cstr(ptr);
-        return iso8859_1::decode_to_string(str.to_bytes());
+        let str_bytes = str.to_bytes_with_nul();
+        let str_len = str_bytes.len();
+
+        unsafe {
+            // Determine the number of widechars required.
+            let wide_size =
+                MultiByteToWideChar(CP_ACP, 0, ptr, str_len as i32, std::ptr::null_mut(), 0);
+
+            if self.widechar_buffer.capacity() < wide_size as usize {
+                self.widechar_buffer
+                    .reserve(std::cmp::max(wide_size as usize, DEFAULT_WIDECHAR_CAPACITY));
+            }
+
+            // Convert to widechar.
+            let wide_ptr = self.widechar_buffer.as_mut_ptr();
+            let wide_size = MultiByteToWideChar(
+                CP_ACP,
+                0,
+                ptr,
+                str_len as i32,
+                wide_ptr,
+                self.widechar_buffer.capacity() as i32,
+            );
+
+            // Determine the number of bytes needed for the utf8 representation.
+            let utf_size = WideCharToMultiByte(
+                CP_UTF8,
+                0,
+                wide_ptr,
+                wide_size,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+
+            // Ensure enough space in the utf buffer.
+            if self.narrow_buffer.capacity() < utf_size as usize {
+                self.narrow_buffer
+                    .reserve(std::cmp::max(utf_size as usize, DEFAULT_NARROW_CAPACITY));
+            }
+
+            let utf_ptr = self.narrow_buffer.as_mut_ptr();
+
+            // Convert to utf8
+            let utf_size = WideCharToMultiByte(
+                CP_UTF8,
+                0,
+                wide_ptr,
+                wide_size,
+                utf_ptr as *mut i8,
+                self.narrow_buffer.capacity() as i32,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+
+            // The sizes reported from Windows APIs include the trailing null byte,
+            // so skip that.
+            if utf_size > 0 {
+                self.narrow_buffer.set_len((utf_size - 1) as usize);
+            }
+
+            // Construct a new string from the bytes of this buffer.
+            let str = std::str::from_utf8_unchecked(&self.narrow_buffer).to_string();
+            str
+        }
     }
 
-    /// Encode a UTF-8 string to Unreal, ensuring null-termination.
+    /// Encode a string to Unreal, ensuring null-termination. It's assumed that the
+    /// string contains only ASCII characters.
+    ///
+    /// TODO: Does this assumption work for systems with a non-western language? The
+    /// only strings we can get here are ascii strings for unreal callback commands,
+    /// qualified class names, and watch expressions. All of these must be ASCII?
     fn encode_string(&mut self, s: &str) -> Vec<u8> {
-        let mut vec = iso8859_1::encode_to_vec(s);
+        let mut vec = s.as_bytes().to_vec();
         vec.push(0);
         vec
     }
