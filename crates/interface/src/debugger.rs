@@ -338,7 +338,6 @@ impl Debugger {
                     ]))
                 } else {
                     log::trace!("Registering pending request for new user watch {expr}");
-                    // TODO we could put the frame index here too?
                     self.pending_variable_request = Some(PendingVariableRequest::UserWatch);
                     let str = format!("addwatch {expr}");
                     log::trace!("handle_command: {str}");

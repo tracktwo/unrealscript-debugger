@@ -5,10 +5,6 @@
 //! the Unrealscript Debugger Interface, which runs in the Unreal process.
 #![warn(missing_docs)]
 
-// TODO:
-//
-// - Fix language encodings
-
 use dap::responses::MessageResponseBody;
 use thiserror::Error;
 pub mod async_client;
