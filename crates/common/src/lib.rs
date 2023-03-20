@@ -332,7 +332,7 @@ pub enum UnrealResponse {
     /// that required the debugger to change the current stack frame. This can be
     /// used by the adapter to invalidate the stack frame prompting a request of
     /// the frame information again. This is also used for [`UnrealRequest.Evaluate`]
-    /// for the same scenario as [`Variables`].
+    /// for the same scenario as [`UnrealRequest.Variables`].
     DeferredVariables(Vec<Variable>),
 }
 
