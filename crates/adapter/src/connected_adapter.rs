@@ -85,6 +85,7 @@ pub struct UnrealscriptAdapter<C: AsyncClient + Unpin> {
     class_map: BTreeMap<String, ClassInfo>,
     control: Option<broadcast::Sender<ControlMessage>>,
     child: Option<Child>,
+    overridden_log_level: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,6 +114,7 @@ where
         config: ClientConfig,
         connection: Box<dyn Connection>,
         child: Option<Child>,
+        overridden_log_level: Option<String>,
     ) -> UnrealscriptAdapter<C> {
         UnrealscriptAdapter {
             class_map: BTreeMap::new(),
@@ -121,6 +123,7 @@ where
             config,
             control: None,
             child,
+            overridden_log_level,
         }
     }
 
@@ -145,9 +148,11 @@ where
 
         // Perform the initialization handshake with the interface to exchange version info.
         // We can't proceed if we fail to manage this initialization protocol.
-        let interface_version = self
-            .connection
-            .initialize(version.clone(), self.config.enable_stack_hack)?;
+        let interface_version = self.connection.initialize(
+            version.clone(),
+            self.config.enable_stack_hack,
+            self.overridden_log_level.as_ref(),
+        )?;
 
         // Perform some version checking and send diagnostics to the client if we have a mismatch.
         match interface_version.cmp(&version) {
@@ -938,6 +943,7 @@ mod tests {
             make_client(),
             ClientConfig::new(),
             Box::new(MockConnection {}),
+            None,
             None,
         )
     }

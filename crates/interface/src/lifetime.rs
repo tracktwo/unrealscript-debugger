@@ -38,8 +38,7 @@
 
 use std::{net::SocketAddr, thread};
 
-use common::{UnrealCommand, UnrealInterfaceMessage, DEFAULT_PORT};
-use flexi_logger::{FileSpec, FlexiLoggerError, Logger};
+use common::{create_logger, UnrealCommand, UnrealInterfaceMessage, DEFAULT_PORT};
 use futures::prelude::*;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -68,7 +67,7 @@ pub fn initialize(cb: UnrealCallback) {
         assert!(dbg.is_none(), "Initialize already called.");
 
         // Start the logger. If this fails there isn't much we can do.
-        let _ = init_logger();
+        init_logger();
 
         // Register a panic handler that will log to the log file, since our stdout/stderr
         // are not connected to anything.
@@ -110,14 +109,11 @@ pub fn initialize(cb: UnrealCallback) {
 }
 
 /// Initialize the logging interface.
-fn init_logger() -> Result<(), FlexiLoggerError> {
+fn init_logger() {
     let mut logger = LOGGER.lock().unwrap();
     assert!(logger.is_none(), "Already have a logger. Multiple inits?");
-    let new_logger = Logger::try_with_env_or_str("trace")?
-        .log_to_file(FileSpec::default().directory("DebuggerLogs"))
-        .start()?;
+    let new_logger = create_logger("interface");
     logger.replace(new_logger);
-    Ok(())
 }
 
 /// An enum representing the result of a client connection.

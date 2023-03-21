@@ -79,10 +79,16 @@ pub trait Connection: Send {
 
     /// Send an initialize request to the interface and retreive the response. Exchanges
     /// version information and other config data.
-    fn initialize(&mut self, version: Version, enable_stack_hack: bool) -> Result<Version, Error> {
+    fn initialize(
+        &mut self,
+        version: Version,
+        enable_stack_hack: bool,
+        overridden_log_level: Option<&String>,
+    ) -> Result<Version, Error> {
         self.send_command(UnrealCommand::Initialize(InitializeRequest {
             version,
             enable_stack_hack,
+            overridden_log_level: overridden_log_level.cloned(),
         }))?;
         let response = expect_response!(self.next_response(), UnrealResponse::Initialize)?;
         Ok(response.version)

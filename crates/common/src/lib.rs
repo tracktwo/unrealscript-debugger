@@ -16,13 +16,30 @@
 
 #![warn(missing_docs)]
 
-use std::fmt::Display;
+use std::{fmt::Display, path::PathBuf};
 
+use flexi_logger::{Duplicate, FileSpec, FlexiLoggerError, Logger, LoggerHandle};
 use serde::{Deserialize, Serialize};
 
 /// The default port to use for the TCP connection between the interface and
 /// adapter.
 pub const DEFAULT_PORT: u16 = 18777u16;
+
+/// An environment variable to specify the default directory for logfiles.
+///
+/// Log files will be created in:
+///
+/// %<UCDEBUGGER_LOGDIR>% if that env var is set, or if not that
+/// %TEMP%\<LOG_DEFAULT_SUBDIR> if %TEMP% exits, or if not that
+/// <current dir>\<LOG_DEFAULT_SUBDIR>
+pub const LOG_DIR_VAR: &str = "UCDEBUGGER_LOGDIR";
+
+/// An environment variable to set the default log level. Should be one of
+/// "error", "warn", "info", "debug", or "trace". If not set we default to "warn".
+pub const LOG_LEVEL_VAR: &str = "UCDEBUGGER_LOGLEVEL";
+
+/// The subdirectory in which to put log files if LOG_DIR_VAR is not set.
+pub const LOG_DEFAULT_SUBDIR: &str = "unrealscript-debugger";
 
 /// An error indicating a particular value (such as a frame or variable index)
 /// is out of range.
@@ -182,6 +199,8 @@ pub struct InitializeRequest {
     /// If true, enable the experimental code for fetching line numbers for
     /// all callstack entries.
     pub enable_stack_hack: bool,
+    /// If set, an overriding log level to use for the interface after connecting.
+    pub overridden_log_level: Option<String>,
 }
 
 /// An initialization response from the interface to the adapter. Tells the
@@ -359,4 +378,70 @@ pub enum UnrealInterfaceMessage {
     /// An event. These can occur at any time without any intervention from the
     /// adapter.
     Event(UnrealEvent),
+}
+
+// Return the log directory to use.
+fn log_dir() -> Option<PathBuf> {
+    // First try the log dir environment variable
+    let mut log_dir = std::env::var(LOG_DIR_VAR).map(PathBuf::from).ok();
+
+    // If not set try the %TEMP% dir and then the current dir in that order, and add the default
+    // subdir to either of these.
+    if log_dir.is_none() {
+        log_dir = std::env::var("TEMP")
+            .ok()
+            .map(PathBuf::from)
+            .or(std::env::current_dir().ok())
+            .map(|mut d| {
+                d.push(LOG_DEFAULT_SUBDIR);
+                d
+            });
+    }
+
+    log_dir
+}
+
+/// Create a logger instance using a common configuration from the environment
+fn create_custom_logger(basename: &str) -> Result<LoggerHandle, FlexiLoggerError> {
+    let mut file_spec = FileSpec::default().basename(basename);
+
+    // Try to read the default log level from an env var, or default to warn if there is none.
+    let level = std::env::var(LOG_LEVEL_VAR)
+        .ok()
+        .unwrap_or("warn".to_string());
+
+    // Try to create a logger with this level
+    let logger = Logger::try_with_env_or_str(level)?;
+
+    // If we have a custom log directory, try that.
+    if let Some(d) = log_dir() {
+        file_spec = file_spec.directory(d);
+    }
+
+    // Try to log to the specified file
+    logger
+        .log_to_file(file_spec)
+        .duplicate_to_stderr(Duplicate::All)
+        .start()
+}
+
+/// Create a logger instance. Will first attempt to respect the settings from various
+/// environment variables, but if that fails will fall back to a default implementation.
+pub fn create_logger(basename: &str) -> LoggerHandle {
+    match create_custom_logger(basename) {
+        Ok(logger) => logger,
+        Err(e) => {
+            let logger = Logger::try_with_str("warn")
+                .unwrap()
+                .log_to_file(FileSpec::default().basename(basename))
+                .duplicate_to_stderr(Duplicate::All)
+                .start()
+                .unwrap();
+            // Log the error we got from the custom settings before returning
+            log::error!(
+                "Failed to create logger from environment, using default log settings: {e}"
+            );
+            logger
+        }
+    }
 }

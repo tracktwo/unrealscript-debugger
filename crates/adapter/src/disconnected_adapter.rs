@@ -13,11 +13,12 @@ use dap::{
     responses::{Response, ResponseBody},
     types::Capabilities,
 };
+use flexi_logger::LogSpecification;
 use tokio::select;
 
 use crate::{
     async_client::AsyncClient, client_config::ClientConfig, comm::tcp::TcpConnection,
-    connected_adapter::UnrealscriptAdapter, UnrealscriptAdapterError,
+    connected_adapter::UnrealscriptAdapter, UnrealscriptAdapterError, _LOGGER,
 };
 
 /// A representation of a disconnected adapter. This manages the portion of the
@@ -165,7 +166,25 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         args: &AttachArguments,
     ) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
         log::info!("Attach request");
-        let port = args.port.unwrap_or(DEFAULT_PORT);
+
+        if let Some(loglevel) = &args.log_level {
+            match LogSpecification::try_from(loglevel) {
+                Ok(newspec) => {
+                    log::info!("Replacing log spec with {loglevel}");
+                    _LOGGER
+                        .write()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .set_new_spec(newspec)
+                }
+                Err(e) => log::error!(
+                    "Failed to set new log level from attach arg {}: {e}",
+                    loglevel
+                ),
+            }
+        }
+        let port = DEFAULT_PORT;
         self.config.source_roots = args.source_roots.clone().unwrap_or_default();
         self.config.enable_stack_hack = args.enable_stack_hack.unwrap_or(true);
         match self.connect_to_interface(port).await {
@@ -179,6 +198,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                     self.config,
                     Box::new(connection),
                     None,
+                    args.log_level.as_ref().cloned(),
                 ))
             }
             Err(e) => {
@@ -257,6 +277,24 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         req: &Request,
         args: &LaunchArguments,
     ) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
+        // Override the default log level if specified.
+        if let Some(loglevel) = &args.log_level {
+            match LogSpecification::try_from(loglevel) {
+                Ok(newspec) => {
+                    log::info!("Replacing log spec with {loglevel}");
+                    _LOGGER
+                        .write()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .set_new_spec(newspec)
+                }
+                Err(e) => log::error!(
+                    "Failed to set new log level from launch arg {}: {e}",
+                    loglevel
+                ),
+            }
+        }
         // Unless instructed otherwise we're going to debug the launched process, so pass
         // '-autoDebug' and try to connect. If 'no_debug' is 'true' then we're just launching and
         // will not try to debug. We could get a later 'attach' request, in which case we can
@@ -268,7 +306,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
             Ok(child) => {
                 // If we're auto-debugging we can now connect to the interface.
                 if auto_debug {
-                    let port = args.port.unwrap_or(DEFAULT_PORT);
+                    let port = DEFAULT_PORT;
                     match self.connect_to_interface(port).await {
                         Ok(connection) => {
                             // Send a response ack for the launch request.
@@ -282,6 +320,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                                 self.config,
                                 Box::new(connection),
                                 Some(child),
+                                args.log_level.as_ref().cloned(),
                             ))
                         }
                         Err(e) => {

@@ -1,9 +1,9 @@
 use adapter::{
     async_client::AsyncClientImpl,
     disconnected_adapter::{DisconnectedAdapter, DisconnectedAdapterError},
+    _LOGGER,
 };
-use common::Version;
-use flexi_logger::{Duplicate, FileSpec, Logger};
+use common::{create_logger, Version};
 use pkg_version::{pkg_version_major, pkg_version_minor, pkg_version_patch};
 
 const ADAPTER_VERSION: Version = Version {
@@ -14,12 +14,8 @@ const ADAPTER_VERSION: Version = Version {
 
 #[tokio::main]
 async fn main() {
-    let _logger = Logger::try_with_env_or_str("trace")
-        .unwrap()
-        .log_to_file(FileSpec::default().directory("logs"))
-        .duplicate_to_stderr(Duplicate::All)
-        .start()
-        .unwrap();
+    // Create the logging instance.
+    _LOGGER.write().unwrap().replace(create_logger("adapter"));
 
     // Clients don't always connect stderr to anything so hook panics and write them to the log.
     std::panic::set_hook(Box::new(|p| {
