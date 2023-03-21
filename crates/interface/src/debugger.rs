@@ -3,6 +3,7 @@
 //! This module contains the definition of the global debugger state object used
 //! by Unreal and all the associated handler functions for managing calls from the
 //! Unreal API and calls from the connected adapter.
+use flexi_logger::LogSpecification;
 use futures::executor;
 use std::ffi::{c_char, CStr};
 use std::thread::JoinHandle;
@@ -19,7 +20,7 @@ use common::{
 use common::{Frame, WatchKind};
 
 use crate::stackhack::{StackHack, DEFAULT_MODEL};
-use crate::{INTERFACE_VERSION, VARIABLE_REQUST_CONDVAR};
+use crate::{INTERFACE_VERSION, LOGGER, VARIABLE_REQUST_CONDVAR};
 
 const MAGIC_DISCONNECT_STRING: &str = "Log: Detaching UnrealScript Debugger (currently detached)";
 
@@ -212,6 +213,22 @@ impl Debugger {
     ) -> Result<CommandAction, DebuggerError> {
         match command {
             UnrealCommand::Initialize(init) => {
+                // Override the default log level if specified.
+                if let Some(loglevel) = &init.overridden_log_level {
+                    match LogSpecification::try_from(loglevel) {
+                        Ok(newspec) => LOGGER
+                            .lock()
+                            .unwrap()
+                            .as_mut()
+                            .unwrap()
+                            .set_new_spec(newspec),
+                        Err(e) => log::error!(
+                            "Failed to set new log level from attach arg {}: {e}",
+                            loglevel
+                        ),
+                    }
+                }
+
                 log::info!(
                     "Connected to adapter version {}.{}.{}; interface version {}.{}.{}",
                     init.version.major,

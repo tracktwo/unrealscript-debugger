@@ -5,7 +5,10 @@
 //! the Unrealscript Debugger Interface, which runs in the Unreal process.
 #![warn(missing_docs)]
 
+use std::sync::RwLock;
+
 use dap::responses::MessageResponseBody;
+use flexi_logger::LoggerHandle;
 use thiserror::Error;
 pub mod async_client;
 pub mod client_config;
@@ -13,6 +16,9 @@ pub mod comm;
 pub mod connected_adapter;
 pub mod disconnected_adapter;
 pub mod variable_reference;
+
+/// The logging instance for the adapter.
+pub static _LOGGER: RwLock<Option<LoggerHandle>> = RwLock::new(None);
 
 /// An error representing failure modes of the adapter. These errors are transmitted
 /// to the client and may be displayed to the user, so they will include several

@@ -10,7 +10,7 @@ dependencies = [
  "bytes",
  "common",
  "dap",
- "flexi_logger",
+ "flexi_logger 0.25.3",
  "futures",
  "interface",
  "log",
@@ -122,6 +122,8 @@ dependencies = [
 name = "common"
 version = "0.0.1"
 dependencies = [
+ "flexi_logger 0.25.3",
+ "log",
  "serde",
 ]
 
@@ -211,6 +213,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "errno"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f639046355ee4f37944e44f60642c6f3a7efa3cf6b78c78a0d989a8ce6c396a1"
+dependencies = [
+ "errno-dragonfly",
+ "libc",
+ "winapi",
+]
+
+[[package]]
+name = "errno-dragonfly"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa68f1b12764fab894d2755d2518754e71b4fd80ecfb822714a1206c2aab39bf"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "flexi_logger"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -219,6 +242,22 @@ dependencies = [
  "atty",
  "chrono",
  "glob",
+ "lazy_static",
+ "log",
+ "nu-ansi-term",
+ "regex",
+ "thiserror",
+]
+
+[[package]]
+name = "flexi_logger"
+version = "0.25.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6eae57842a8221ef13f1f207632d786a175dd13bd8fbdc8be9d852f7c9cf1046"
+dependencies = [
+ "chrono",
+ "glob",
+ "is-terminal",
  "lazy_static",
  "log",
  "nu-ansi-term",
@@ -346,6 +385,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hermit-abi"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fed44880c466736ef9a5c5b5facefb5ed0785676d0c02d612db14e54f0d84286"
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -374,7 +419,7 @@ name = "interface"
 version = "0.0.1"
 dependencies = [
  "common",
- "flexi_logger",
+ "flexi_logger 0.25.3",
  "futures",
  "log",
  "pkg-version",
@@ -384,6 +429,29 @@ dependencies = [
  "tokio-serde",
  "tokio-util",
  "winapi",
+]
+
+[[package]]
+name = "io-lifetimes"
+version = "1.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0dd6da19f25979c7270e70fa95ab371ec3b701cd0eefc47667a09785b3c59155"
+dependencies = [
+ "hermit-abi 0.3.1",
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
+name = "is-terminal"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8687c819457e979cc940d09cb16e42a1bf70aa6b60a549de6d3a62a0ee90c69e"
+dependencies = [
+ "hermit-abi 0.3.1",
+ "io-lifetimes",
+ "rustix",
+ "windows-sys",
 ]
 
 [[package]]
@@ -421,6 +489,12 @@ checksum = "ecd207c9c713c34f95a097a5b029ac2ce6010530c7b49d7fea24d977dede04f5"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f051f77a7c8e6957c0696eac88f26b0117e54f52d3fc682ab19397a8812846a4"
 
 [[package]]
 name = "lock_api"
@@ -661,6 +735,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustix"
+version = "0.36.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fe885c3a125aa45213b68cc1472a49880cb5923dc23f522ad2791b882228778"
+dependencies = [
+ "bitflags",
+ "errno",
+ "io-lifetimes",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -804,7 +892,7 @@ dependencies = [
  "adapter",
  "common",
  "dap",
- "flexi_logger",
+ "flexi_logger 0.24.2",
  "futures",
  "interface",
  "log",

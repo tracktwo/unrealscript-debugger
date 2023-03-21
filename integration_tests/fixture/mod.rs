@@ -55,6 +55,7 @@ pub async fn setup_with_client<C: AsyncClient + Unpin>(
         },
         Box::new(TcpConnection::connect(port).await.unwrap()),
         None,
+        None,
     );
 
     log::trace!("Created adapter");

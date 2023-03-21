@@ -77,9 +77,6 @@ pub struct IgnoredArguments {}
 /// from the launch configuration of the editor.
 #[derive(Deserialize, Debug)]
 pub struct AttachArguments {
-    /// The port number to use for communication with the interface. If not specified
-    /// a default port number will be used.
-    pub port: Option<u16>,
     /// An ordered list of directories in which to search for source files. This is required
     /// so that we can tell the editor what file to open when the debugger breaks in some
     /// Unreal class. It relies on the naming and directory layout convention of Unreal so
@@ -90,6 +87,10 @@ pub struct AttachArguments {
     /// the top-most entry of the stack, but DAP and most editors want to know the line number for
     /// each element in the trace.
     pub enable_stack_hack: Option<bool>,
+
+    /// Override the log level with the given log spec. Can be one of 'trace', 'debug', 'info',
+    /// 'warn', or 'error'; or a more complex log spec.
+    pub log_level: Option<String>,
 }
 
 /// Arguments for a [`Command::Evaluate`] command.
@@ -133,8 +134,6 @@ pub struct InitializeArguments {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchArguments {
-    /// The port to use to communicate with the interface.
-    pub port: Option<u16>,
     /// If `true` we will launch but not debug the program.
     pub no_debug: Option<bool>,
     /// The list of source roots. See [`AttachArguments::source_roots`].
@@ -145,6 +144,9 @@ pub struct LaunchArguments {
     pub program: Option<String>,
     /// An array of arguments to pass to the program.
     pub args: Option<Vec<String>>,
+    /// Override the log level with the given log spec. Can be one of 'trace', 'debug', 'info',
+    /// 'warn', or 'error'; or a more complex log spec.
+    pub log_level: Option<String>,
 }
 
 /// Arguments for a [`Command::Scopes`] request.
