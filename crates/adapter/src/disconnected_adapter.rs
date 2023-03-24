@@ -274,25 +274,21 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     fn determine_port(arg: Option<i64>) -> Option<u16> {
         // Check for a port override.
         match arg {
-            Some(p) => {
-                match p.try_into() {
-                    Ok(p) => {
-                        std::env::set_var(PORT_VAR, format!("{p}"));
-                        Some(p)
-                    }
-                    Err(_) => {
-                        log::error!("Bad port in launch arguments: {p}");
-                        None
-                    }
+            Some(p) => match p.try_into() {
+                Ok(p) => {
+                    std::env::set_var(PORT_VAR, format!("{p}"));
+                    Some(p)
                 }
-            }
+                Err(_) => {
+                    log::error!("Bad port in launch arguments: {p}");
+                    None
+                }
+            },
             None => {
                 // No port specified in the arguments, try the environment.
                 if let Ok(str) = std::env::var(PORT_VAR) {
                     match str.parse::<u16>() {
-                        Ok(v) => {
-                            Some(v)
-                        },
+                        Ok(v) => Some(v),
                         Err(_) => {
                             log::error!("Bad port value in {}: {str}", PORT_VAR);
                             None

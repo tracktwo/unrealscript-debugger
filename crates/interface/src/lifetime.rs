@@ -133,7 +133,7 @@ fn determine_port() -> u16 {
         match str.parse::<u16>() {
             Ok(v) => {
                 return v;
-            },
+            }
             Err(_) => {
                 log::error!("Bad port value in {}: {str}", PORT_VAR);
             }
@@ -146,7 +146,6 @@ fn determine_port() -> u16 {
 /// The main worker thread for the debugger interface. This is created when the
 /// debugger session is created, and returns when the debugger session ends.
 async fn main_loop(cb: UnrealCallback, mut crx: Receiver<()>) -> Result<(), tokio::io::Error> {
-
     let port = determine_port();
 
     log::info!("Listening for connections on port {port}");
