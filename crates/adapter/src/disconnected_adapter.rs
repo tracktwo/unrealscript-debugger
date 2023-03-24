@@ -69,6 +69,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                 supports_invalidated_event: false,
                 source_roots: vec![],
                 enable_stack_hack: false,
+                auto_resume: false,
             },
         }
     }
@@ -125,6 +126,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
             supports_invalidated_event: args.supports_invalidated_event.unwrap_or(false),
             source_roots: vec![],
             enable_stack_hack: false,
+            auto_resume: false,
         };
 
         // Send the response.
@@ -352,6 +354,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                             self.client.respond(Response::make_ack(req))?;
                             self.config.source_roots =
                                 args.source_roots.clone().unwrap_or_default();
+                            self.config.auto_resume = args.auto_resume.unwrap_or(false);
                             self.config.enable_stack_hack = args.enable_stack_hack.unwrap_or(true);
 
                             Ok(UnrealscriptAdapter::new(

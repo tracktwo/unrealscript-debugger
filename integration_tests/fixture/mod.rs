@@ -29,7 +29,7 @@ pub type TcpFrame = tokio_serde::Framed<
 /// Integration test setup:
 /// - construct an adapter and client
 /// - Create a channel to receive events and hook this up to the client
-/// - open a tcp listener for a mock interface on a random port.
+/// - open a TCP listener for a mock interface on a random port.
 /// - Spawn a thread to process messages on that port and dispatch them to the provided closure
 /// - Initialize communication between the two by sending an initialize and attach request.
 ///
@@ -52,6 +52,7 @@ pub async fn setup_with_client<C: AsyncClient + Unpin>(
             supports_invalidated_event: false,
             source_roots: vec![],
             enable_stack_hack: false,
+            auto_resume: false,
         },
         Box::new(TcpConnection::connect(port).await.unwrap()),
         None,
@@ -69,14 +70,14 @@ pub async fn setup_with_client<C: AsyncClient + Unpin>(
     // Build a json formatter that can deserialize events and serialize commands.
     let format: Json<UnrealCommand, UnrealInterfaceMessage> = Json::default();
 
-    // Build a source + sink for that Json format on top of our framing system.
+    // Build a source + sink for that json format on top of our framing system.
     let tcp_stream = tokio_serde::Framed::new(frame, format);
     let (mut tcp_tx, tcp_rx) = tcp_stream.split();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(128);
     dbg.new_connection(tx);
 
-    // Spawn a task to monitor the receiving side of events and push them through the tcp
+    // Spawn a task to monitor the receiving side of events and push them through the TCP
     // connection.
     tokio::task::spawn(async move {
         while let Some(msg) = rx.recv().await {

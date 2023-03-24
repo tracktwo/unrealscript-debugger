@@ -759,12 +759,25 @@ where
                     output: msg,
                 }),
             }),
-            UnrealEvent::Stopped => Some(Event {
-                body: EventBody::Stopped(StoppedEventBody {
-                    reason: StoppedEventReason::Breakpoint,
-                    thread_id: UNREAL_THREAD_ID,
-                }),
-            }),
+            UnrealEvent::Stopped => {
+                if self.config.auto_resume {
+                    log::info!("auto-resuming from initial breakpoint");
+                    self.config.auto_resume = false;
+                    match self.connection.go() {
+                        Ok(()) => return None,
+                        Err(e) => {
+                            log::error!("Error auto-resuming after initial breakpoint: {e}");
+                        }
+                    }
+                }
+
+                Some(Event {
+                    body: EventBody::Stopped(StoppedEventBody {
+                        reason: StoppedEventReason::Breakpoint,
+                        thread_id: UNREAL_THREAD_ID,
+                    }),
+                })
+            }
             UnrealEvent::Disconnect => {
                 // We've received a disconnect event from interface. This means
                 // the connection is shutting down. Send the shutdown control
