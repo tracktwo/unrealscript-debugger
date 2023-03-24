@@ -5,7 +5,7 @@
 //!
 //! The debug adapter DLL's lifetime is entirely controlled by Unreal. The
 //! DLL is loaded when a debugging session starts, and is unloaded when the
-//! debugging session ends. This is a toal unload and the DLL is unmapped from
+//! debugging session ends. This is a total unload and the DLL is unmapped from
 //! memory entirely, so we need to be careful to allow for graceful shutdown
 //! when the debugging session is ending. This is made more difficult because
 //! Unreal doesn't actually directly tell us when this is going to happen,
@@ -38,7 +38,7 @@
 
 use std::{net::SocketAddr, thread};
 
-use common::{create_logger, UnrealCommand, UnrealInterfaceMessage, DEFAULT_PORT};
+use common::{create_logger, UnrealCommand, UnrealInterfaceMessage, DEFAULT_PORT, PORT_VAR};
 use futures::prelude::*;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -83,7 +83,7 @@ pub fn initialize(cb: UnrealCallback) {
         let (ctx, crx) = broadcast::channel(10);
 
         // Start the main loop that will listen for connections so we can
-        // communiate the debugger state to the adapter. This will spin up a
+        // communicate the debugger state to the adapter. This will spin up a
         // new async runtime for this thread only and wait for the main loop
         // to complete.
         let handle = thread::spawn(move || {
@@ -126,11 +126,31 @@ enum ConnectionResult {
     Shutdown,
 }
 
+// Determine the port number to use. If the environment has a valid port number
+// use that, otherwise use the default port.
+fn determine_port() -> u16 {
+    if let Ok(str) = std::env::var(PORT_VAR) {
+        match str.parse::<u16>() {
+            Ok(v) => {
+                return v;
+            }
+            Err(_) => {
+                log::error!("Bad port value in {}: {str}", PORT_VAR);
+            }
+        }
+    }
+
+    DEFAULT_PORT
+}
+
 /// The main worker thread for the debugger interface. This is created when the
 /// debugger session is created, and returns when the debugger session ends.
 async fn main_loop(cb: UnrealCallback, mut crx: Receiver<()>) -> Result<(), tokio::io::Error> {
+    let port = determine_port();
+
+    log::info!("Listening for connections on port {port}");
     // Start listening on a socket for connections from the adapter.
-    let addr: SocketAddr = format!("127.0.0.1:{DEFAULT_PORT}")
+    let addr: SocketAddr = format!("127.0.0.1:{port}")
         .parse()
         .expect("Failed to parse address");
 
