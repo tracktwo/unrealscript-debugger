@@ -149,6 +149,8 @@ pub struct LaunchArguments {
     pub log_level: Option<String>,
     /// Specify the port number to use for communications with the interface.
     pub port: Option<i64>,
+    /// If true, auto-resume after the first implicit breakpoint is hit.
+    pub auto_resume: Option<bool>,
 }
 
 /// Arguments for a [`Command::Scopes`] request.

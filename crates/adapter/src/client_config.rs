@@ -25,6 +25,9 @@ pub struct ClientConfig {
 
     /// Enable scraping line numbers out of Unreal for all stack frames. Experimental.
     pub enable_stack_hack: bool,
+
+    /// Auto resume after the first breakpoint
+    pub auto_resume: bool,
 }
 
 impl ClientConfig {
@@ -36,6 +39,7 @@ impl ClientConfig {
             supports_invalidated_event: false,
             source_roots: vec![],
             enable_stack_hack: false,
+            auto_resume: false,
         }
     }
 }
