@@ -40,7 +40,7 @@ use crate::{
     variable_reference::VariableReference, UnrealscriptAdapterError,
 };
 
-/// The thread ID to use for the unrealscript thread. The unreal debugger only supports one thread.
+/// The thread ID to use for the Unrealscript thread. The unreal debugger only supports one thread.
 const UNREAL_THREAD_ID: i64 = 1;
 
 // Information about a class.
@@ -63,7 +63,7 @@ impl ClassInfo {
         })
     }
 
-    /// Return a string containing a qualified classname: "package.class"
+    /// Return a string containing a qualified class name: "package.class"
     pub fn qualify(&self) -> String {
         format!("{}.{}", self.package_name, self.class_name)
     }
@@ -139,7 +139,7 @@ where
     ///
     /// # Errors
     ///
-    /// This function returns an io error only in unrecoverable scenarios,
+    /// This function returns an i/o error only in unrecoverable scenarios,
     /// typically if the client or interface communication channels have closed.
     pub async fn process_messages(&mut self, version: Version) -> Result<(), std::io::Error> {
         // Set up the control channel
@@ -309,8 +309,6 @@ where
         &mut self,
         args: &SetBreakpointsArguments,
     ) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        log::info!("Set breakpoints request");
-
         // Break the source file out into sections and record it in our map of
         // known classes if necessary.
         let path = args
@@ -380,7 +378,6 @@ where
 
     /// Handle a threads request
     fn threads(&mut self) -> Result<ResponseBody, UnrealscriptAdapterError> {
-        log::info!("Threads request");
         Ok(ResponseBody::Threads(ThreadsResponseBody {
             threads: vec![Thread {
                 id: 1,
@@ -399,7 +396,7 @@ where
                 continue;
             }
 
-            log::info!("Searching source root {root} for {package}.{class}");
+            log::debug!("Searching source root {root} for {package}.{class}");
 
             let candidate = path
                 .join(package)
@@ -426,7 +423,7 @@ where
             // Strip the UNC prefix canonicalize added. This is not strictly necessary but makes
             // the pathnames look nicer in the editor.
             let str = path.and_then(|s| s.strip_prefix("\\\\?\\"));
-            log::info!("Mapped {package}.{class} -> {str:?}");
+            log::debug!("Mapped {package}.{class} -> {str:?}");
             return str.map(|s| s.to_owned());
         }
 
@@ -508,7 +505,7 @@ where
             .try_into()
             .map_err(|e: TryFromIntError| UnrealscriptAdapterError::LimitExceeded(e.to_string()))?;
 
-        log::info!("Stack trace request for {levels} frames starting at {start_frame}");
+        log::debug!("Stack trace request for {levels} frames starting at {start_frame}");
 
         let response = self.connection.stack_trace(StackTraceRequest {
             start_frame,

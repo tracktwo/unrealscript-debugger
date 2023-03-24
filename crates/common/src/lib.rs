@@ -25,6 +25,9 @@ use serde::{Deserialize, Serialize};
 /// adapter.
 pub const DEFAULT_PORT: u16 = 18777u16;
 
+/// An environment variable to specify the port to use.
+pub const PORT_VAR: &str = "UCDEBUGGER_PORT";
+
 /// An environment variable to specify the default directory for logfiles.
 ///
 /// Log files will be created in:

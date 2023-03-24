@@ -7,7 +7,7 @@
 
 use std::process::Child;
 
-use common::DEFAULT_PORT;
+use common::{DEFAULT_PORT, PORT_VAR};
 use dap::{
     requests::{AttachArguments, Command, InitializeArguments, LaunchArguments, Request},
     responses::{Response, ResponseBody},
@@ -230,7 +230,6 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         let mut command = &mut std::process::Command::new(program);
         if let Some(a) = program_args {
             command = command.args(a);
-            log::info!("Program args are {:#?}", command.get_args());
         }
 
         // Append '-autoDebug' if we're launching so we can be sure the interface will launch and
@@ -264,6 +263,48 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         Ok(child)
     }
 
+    // Determine the port number to use.
+    //
+    // - If the given argument is Some, use it if valid or emit an error. This
+    //   is expected to be a number from DAP. If this number is valid also set
+    //   the port env var to this value so the adapter can find it when we launch.
+    // - Check the environment for a value, parse that and use it
+    //   if valid or emit an error if not.
+    // - If neither of the above are valid, return none.
+    fn determine_port(arg: Option<i64>) -> Option<u16> {
+        // Check for a port override.
+        match arg {
+            Some(p) => {
+                match p.try_into() {
+                    Ok(p) => {
+                        std::env::set_var(PORT_VAR, format!("{p}"));
+                        Some(p)
+                    }
+                    Err(_) => {
+                        log::error!("Bad port in launch arguments: {p}");
+                        None
+                    }
+                }
+            }
+            None => {
+                // No port specified in the arguments, try the environment.
+                if let Ok(str) = std::env::var(PORT_VAR) {
+                    match str.parse::<u16>() {
+                        Ok(v) => {
+                            Some(v)
+                        },
+                        Err(_) => {
+                            log::error!("Bad port value in {}: {str}", PORT_VAR);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     /// Launch a process and optionally attach to it.
     ///
     /// If we are in autodebug mode we will immediately attach, and on success
@@ -295,6 +336,9 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
                 ),
             }
         }
+
+        let port = Self::determine_port(args.port).unwrap_or(DEFAULT_PORT);
+
         // Unless instructed otherwise we're going to debug the launched process, so pass
         // '-autoDebug' and try to connect. If 'no_debug' is 'true' then we're just launching and
         // will not try to debug. We could get a later 'attach' request, in which case we can
@@ -306,7 +350,6 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
             Ok(child) => {
                 // If we're auto-debugging we can now connect to the interface.
                 if auto_debug {
-                    let port = DEFAULT_PORT;
                     match self.connect_to_interface(port).await {
                         Ok(connection) => {
                             // Send a response ack for the launch request.

@@ -115,7 +115,7 @@ pub struct InitializeArguments {
     pub lines_start_at1: Option<bool>,
 
     /// If true the client supports 'type' fields in variables. If this is not
-    /// set to true we will not send type info as part of variables respoonses.
+    /// set to true we will not send type info as part of variables responses.
     pub supports_variable_type: Option<bool>,
 
     /// If true the client supports 'invalidated' events. If not set to true
@@ -147,6 +147,8 @@ pub struct LaunchArguments {
     /// Override the log level with the given log spec. Can be one of 'trace', 'debug', 'info',
     /// 'warn', or 'error'; or a more complex log spec.
     pub log_level: Option<String>,
+    /// Specify the port number to use for communications with the interface.
+    pub port: Option<i64>,
 }
 
 /// Arguments for a [`Command::Scopes`] request.
