@@ -25,4 +25,4 @@ pkg-version = "1.0.0"
 
 [[bin]]
 path = "src/main.rs"
-name = "unrealscript-debugger-adapter"
+name = "adapter"
