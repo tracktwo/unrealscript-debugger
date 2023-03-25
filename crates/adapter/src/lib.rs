@@ -7,7 +7,7 @@
 
 use std::sync::RwLock;
 
-use dap::responses::MessageResponseBody;
+use dap::types::Message;
 use flexi_logger::LoggerHandle;
 use thiserror::Error;
 pub mod async_client;
@@ -88,8 +88,8 @@ impl UnrealscriptAdapterError {
 
     /// Convet an UnrealScriptAdapterError to a DAP error message suitable
     /// for use as a body in an error response.
-    pub fn to_error_message(&self) -> MessageResponseBody {
-        MessageResponseBody {
+    pub fn to_error_message(&self) -> Message {
+        Message {
             id: self.id(),
             format: self.to_string(),
             show_user: true,
