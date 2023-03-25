@@ -7,7 +7,10 @@ use serde::Serialize;
 
 use crate::{
     requests::Request,
-    types::{Breakpoint, Capabilities, Scope, StackFrame, Thread, Variable, VariableReferenceInfo},
+    types::{
+        Breakpoint, Capabilities, Message, Scope, StackFrame, Thread, Variable,
+        VariableReferenceInfo,
+    },
 };
 
 /// The top-level protocol message for a response. This is typically used directly only by
@@ -67,12 +70,12 @@ impl Response {
 
     /// Helper to construct an error response to the ginen request with the given
     /// title and body.
-    pub fn make_error(request: &Request, title: String, message: MessageResponseBody) -> Self {
+    pub fn make_error(request: &Request, title: String, message: Message) -> Self {
         Self {
             request_seq: request.seq,
             success: false,
             message: Some(title),
-            body: Some(ResponseBody::Message(message)),
+            body: Some(ResponseBody::Error(ErrorResponseBody { error: message })),
             command: request.command.to_string(),
         }
     }
@@ -99,7 +102,7 @@ pub enum ResponseBody {
     /// The response to an [`crate::requests::Command::Evaluate`] request.
     Evaluate(EvaluateResponseBody),
     /// The response body for an error response.
-    Message(MessageResponseBody),
+    Error(ErrorResponseBody),
 }
 
 /// A [`ResponseBody::SetBreakpoints`] response. Contains the list of breakpoints
@@ -196,16 +199,10 @@ pub struct EvaluateResponseBody {
     pub variable_info: VariableReferenceInfo,
 }
 
-/// A response body for an error response.
+/// A response body for an error response
 #[derive(Serialize, Debug)]
-#[serde(rename = "message")]
-pub struct MessageResponseBody {
-    /// An implementation-specific ID. This number should be unique per error message
-    /// kind. Can be used to help the user look up info on the error.
-    pub id: i64,
-    /// The error contents.
-    pub format: String,
-    /// If true this error should be displayed to the user.
-    #[serde(rename = "showUser")]
-    pub show_user: bool,
+#[serde(rename = "error")]
+pub struct ErrorResponseBody {
+    /// The error message
+    pub error: Message,
 }

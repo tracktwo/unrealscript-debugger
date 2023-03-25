@@ -60,7 +60,7 @@ impl TcpConnection {
         }
 
         // If we failed to connect we can't go any further.
-        let tcp = tcp.ok_or(Error::new(ErrorKind::NotConnected, "Failed to connect"))?;
+        let tcp = tcp.ok_or(Error::new(ErrorKind::NotConnected, "Failed to connect. Ensure the debug interface has been installed to the game directory."))?;
 
         log::trace!("Connected to interface");
 

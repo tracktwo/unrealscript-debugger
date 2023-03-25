@@ -141,6 +141,20 @@ pub struct VariableReferenceInfo {
     pub indexed_variables: Option<i64>,
 }
 
+/// A type for error messages
+#[derive(Serialize, Debug)]
+#[serde(rename = "message")]
+pub struct Message {
+    /// An implementation-specific ID. This number should be unique per error message
+    /// kind. Can be used to help the user look up info on the error.
+    pub id: i64,
+    /// The error contents.
+    pub format: String,
+    /// If true this error should be displayed to the user.
+    #[serde(rename = "showUser")]
+    pub show_user: bool,
+}
+
 impl VariableReferenceInfo {
     /// Construct a new variable reference info struct for a variable with no
     /// children.
