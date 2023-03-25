@@ -1,0 +1,107 @@
+{
+    "name": "unrealscript-debugger",
+    "displayName": "Unrealscript Debugger",
+    "description": "Debugger for UnrealScript",
+    "repository": "https://github.com/tracktwo/unrealscript-debugger",
+    "license": "MIT",
+    "version": "0.0.1",
+    "preview": true,
+    "publisher": "tracktwo",
+    "author": {
+        "name": "tracktwo"
+    },
+    "license": "MIT",
+    "engines": {
+        "vscode": "^1.74.0"
+    },
+    "categories": [
+        "Debuggers"
+    ],
+    "activationEvents": [
+        "onDebug"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "debuggers": [
+            {
+                "type": "unrealscript",
+                "label": "Unrealscript debug",
+                "program": "bin\\win64\\adapter.exe",
+                "languages": [
+                    "unrealscript",
+                    "uc"
+                ],
+                "configurationAttributes": {
+                    "attach": {
+                        "required": [
+                            "sourceRoots"
+                        ],
+                        "properties": {
+                            "sourceRoots": {
+                                "type": "array",
+                                "description": "paths to source files to pass to the debug adapter"
+                            },
+                            "logLevel": {
+                                "type": "string",
+                                "description": "log level to override the default or environment"
+                            }
+                        }
+                    },
+                    "launch": {
+                        "required": [
+                            "sourceRoots",
+                            "program",
+                            "args"
+                        ],
+                        "properties": {
+                            "sourceRoots": {
+                                "type": "array",
+                                "description": "paths to source files to pass to the debug adapter"
+                            },
+                            "program": {
+                                "type": "string",
+                                "description": "path to the program to debug"
+                            },
+                            "args": {
+                                "type": "array",
+                                "description": "arguments to pass to the program"
+                            },
+                            "logLevel": {
+                                "type": "string",
+                                "description": "log level to override the default or environment"
+                            },
+                            "port": {
+                                "type": "integer",
+                                "description": "port number to use for connection to the interface",
+                                "minimum": 1024,
+                                "maximum": 65535
+                            },
+                            "autoResume": {
+                                "type": "boolean",
+                                "description": "auto-resume after the automatic first breakpoint after launch"
+                            }
+                        }
+                    }
+                }
+            }
+        ],
+        "breakpoints": [
+            {
+                "language": "unrealscript"
+            }
+        ],
+        "commands": [
+            {
+                "command": "extension.unrealscript-debugger-install-interface",
+                "title": "Install UnrealScript Debugger Interface",
+                "category": "UnrealScript Debugger"
+            }
+        ]
+    },
+    "scripts": {
+        "compile": "tsc -p ."
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.42.0"
+    }
+}
