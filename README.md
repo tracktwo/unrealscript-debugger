@@ -66,7 +66,7 @@ debugger. This can be created or editted by clicking the _Run and Debug_ tab in
 VS Code then clicking the gear icon to configure. An example `launch.json` that
 defines two configurations is shown below:
 
-```
+```json
 {
     "version": "0.2.0",
     "configurations":[
@@ -114,6 +114,10 @@ The following configuration settings are optional:
 * `logLevel`: A string for the log level to use for internal debugger logging.
   Can be one of `error`, `warn`, `info`, `debug`, or `trace`. Defaults to
   `warn`. By default logs are written to `%TEMP%\unrealscript-debugger\`.
+* `enableStackHack`: A boolean to enable or disable experimental stack trace support.
+This is enabled by default, but could potentially cause issues in some games and
+can be disabled if so. Without this option full line information for all frames in
+the call stack will not be available until you switch to that frame in the debugger.
 
 #### Source Roots
 
