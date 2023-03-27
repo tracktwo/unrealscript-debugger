@@ -9,7 +9,7 @@
 //! claim to support them.
 //!
 //! Many fields in the DAP requests, responses, events, and types are optional, and this
-//! implemetation excludes many optional fields that we don't support, relying on the default
+//! implementation excludes many optional fields that we don't support, relying on the default
 //! serde behavior of skipping unknown fields during deserialization.
 //!
 //! In some cases optional fields in the response or event messages or in types exclusive to

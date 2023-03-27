@@ -38,7 +38,7 @@ pub type TcpFrame = tokio_serde::Framed<
 /// Test cases can now send requests and receive responses through the adapter. Events sent from
 /// the closure will appear in the event receiver.
 
-pub async fn setup_with_client<C: AsyncClient + Unpin>(
+pub async fn setup_with_client<C: AsyncClient>(
     client: C,
 ) -> (UnrealscriptAdapter<C>, Debugger, SplitStream<TcpFrame>) {
     let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();

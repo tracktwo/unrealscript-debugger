@@ -68,7 +68,7 @@ impl Response {
         }
     }
 
-    /// Helper to construct an error response to the ginen request with the given
+    /// Helper to construct an error response to the given request with the given
     /// title and body.
     pub fn make_error(request: &Request, title: String, message: Message) -> Self {
         Self {
@@ -146,7 +146,7 @@ pub struct StackTraceResponseBody {
 }
 
 /// A [`ResponseBody::Scopes`] response.
-/// Contains information about the global and local scopes including an identitier to use when
+/// Contains information about the global and local scopes including an identifier to use when
 /// requesting variables in these scopes and counts of the number of variables.
 #[derive(Serialize, Debug)]
 #[serde(rename = "scopes")]

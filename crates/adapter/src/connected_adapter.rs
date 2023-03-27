@@ -78,7 +78,7 @@ impl ClassInfo {
 }
 
 /// A connected Unrealscript debug adapter.
-pub struct UnrealscriptAdapter<C: AsyncClient + Unpin> {
+pub struct UnrealscriptAdapter<C: AsyncClient> {
     client: C,
     config: ClientConfig,
     connection: Box<dyn Connection>,
@@ -93,7 +93,7 @@ enum ControlMessage {
     Shutdown,
 }
 
-impl<C: AsyncClient + Unpin> Drop for UnrealscriptAdapter<C> {
+impl<C: AsyncClient> Drop for UnrealscriptAdapter<C> {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             log::trace!("Killing child process.");
@@ -106,7 +106,7 @@ impl<C: AsyncClient + Unpin> Drop for UnrealscriptAdapter<C> {
 
 impl<C> UnrealscriptAdapter<C>
 where
-    C: AsyncClient + Unpin,
+    C: AsyncClient,
 {
     /// Construct a new connected adapter.
     pub fn new(

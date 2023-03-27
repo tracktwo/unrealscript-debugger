@@ -3,7 +3,7 @@
 //! This module defines the data format between the two. There are three types
 //! of message that can be sent between the components:
 //!
-//! - Commands are sent from the adapter to the interface, and instruct the deubgger
+//! - Commands are sent from the adapter to the interface, and instruct the debugger
 //! to do something (e.g. set a breakpoint, or step over the next line).
 //!
 //! - Responses are sent from the interface to the adapter, always in predictable
@@ -34,7 +34,7 @@ pub const PORT_VAR: &str = "UCDEBUGGER_PORT";
 ///
 /// %<UCDEBUGGER_LOGDIR>% if that env var is set, or if not that
 /// %TEMP%\<LOG_DEFAULT_SUBDIR> if %TEMP% exits, or if not that
-/// <current dir>\<LOG_DEFAULT_SUBDIR>
+/// {current dir}\{LOG_DEFAULT_SUBDIR}
 pub const LOG_DIR_VAR: &str = "UCDEBUGGER_LOGDIR";
 
 /// An environment variable to set the default log level. Should be one of
@@ -113,7 +113,7 @@ impl VariableIndex {
     /// The largest variable index we can represent: must fit in 20 bits.
     pub const MAX: u32 = 0xF_FFFF;
 
-    /// A variable index reprsenting a scope root.
+    /// A variable index representing a scope root.
     pub const SCOPE: VariableIndex = VariableIndex(0);
 
     /// Create a variable reference from the given value.
@@ -305,7 +305,7 @@ pub enum UnrealCommand {
     /// Determine the number of watches of the given kind in the currently active
     /// frame.
     WatchCount(WatchKind, VariableIndex),
-    /// Retreive variables. This returns all children of a particular parent (either a scope or
+    /// Retrieve variables. This returns all children of a particular parent (either a scope or
     /// a structured variable).
     Variables(WatchKind, FrameIndex, VariableIndex, usize, usize),
 
