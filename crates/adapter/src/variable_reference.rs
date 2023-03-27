@@ -2,7 +2,7 @@
 //!
 //! DAP refers to variables with references, see "Lifetime of Object References" in
 //! <https://microsoft.github.io/debug-adapter-protocol/overview>. DAP specifies these as 'numbers',
-//! which are mapped to i64 values by the dap-rs crate but DAP only supports variable references in
+//! which are mapped to i64 values by the dap crate but DAP only supports variable references in
 //! the open interval (0-2^31). That is, it must be a non-negative number that fits in an i32.
 //!
 //! When we emit a scope or a variable to DAP we assign it a variable reference, and DAP can

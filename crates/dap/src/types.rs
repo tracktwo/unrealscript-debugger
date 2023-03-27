@@ -18,7 +18,7 @@ pub struct Capabilities {
 
 /// Breakpoints are sent as part of the [`crate::responses::ResponseBody::SetBreakpoints`] response.
 ///
-/// These indicate where a breakpoint was actually set. In pratice Unreal does not modify
+/// These indicate where a breakpoint was actually set. In practice Unreal does not modify
 /// the positions of breakpoints, so this will always be exactly the same as the position
 /// the client requested.
 #[derive(Serialize, Debug)]

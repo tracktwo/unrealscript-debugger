@@ -23,7 +23,7 @@ jobs:
       - name: cargo doc
         run: cargo doc --no-deps --all-features
         env:
-          RUSTFLAGS: -D warnings
+          RUSTDOCFLAGS: -D warnings
   test:
     runs-on: windows-latest
     name: test ${{ matrix.target }}

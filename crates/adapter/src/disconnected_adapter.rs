@@ -14,7 +14,7 @@ use dap::{
     types::Capabilities,
 };
 use flexi_logger::LogSpecification;
-use tokio::select;
+use tokio::{pin, select};
 
 use crate::{
     async_client::AsyncClient, client_config::ClientConfig, comm::tcp::TcpConnection,
@@ -23,7 +23,7 @@ use crate::{
 
 /// A representation of a disconnected adapter. This manages the portion of the
 /// protocol up to the point where a connection to the debuggee is established.
-pub struct DisconnectedAdapter<C: AsyncClient + Unpin> {
+pub struct DisconnectedAdapter<C: AsyncClient> {
     client: C,
     config: ClientConfig,
 }
@@ -39,26 +39,26 @@ pub struct DisconnectedAdapter<C: AsyncClient + Unpin> {
 /// - If we fail to launch or attach, receive a disconnect request from the client, or
 /// receive unexpected protocol messages from the client we may fail to connect but
 /// can continue processing messages and may be able to connect in the future.
-pub enum DisconnectedAdapterError<C: AsyncClient + Unpin> {
+pub enum DisconnectedAdapterError<C: AsyncClient> {
     /// Represents a fatal error communicating with the client. There is no way to
     /// continue to attempt connection since no more instructions will come from the
     /// client or we can't send any responses. The adapter should give up when
     /// receiving this error.
     IoError(std::io::Error),
 
-    /// We failed to connect, but still have valid commmunications with the client.
+    /// We failed to connect, but still have valid communications with the client.
     /// We may be able to retry, so this error mode returns the same disconnected
     /// adapter so we can try again.
     NoConnection(DisconnectedAdapter<C>),
 }
 
-impl<C: AsyncClient + Unpin> From<std::io::Error> for DisconnectedAdapterError<C> {
+impl<C: AsyncClient> From<std::io::Error> for DisconnectedAdapterError<C> {
     fn from(e: std::io::Error) -> Self {
         DisconnectedAdapterError::IoError(e)
     }
 }
 
-impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
+impl<C: AsyncClient> DisconnectedAdapter<C> {
     /// Create a new disconnected adapter for the given client.
     pub fn new(client: C) -> Self {
         DisconnectedAdapter {
@@ -79,8 +79,10 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     /// manage the rest of the session.
     pub async fn connect(mut self) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
         loop {
+            let req_fut = self.client.next_request();
+            pin!(req_fut);
             select! {
-                request = self.client.next_request() => {
+                request = req_fut => {
                     log::trace!("Received request: {request:?}");
                     match request {
                         Some(Ok(request)) => {
@@ -148,7 +150,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
     ) -> Result<TcpConnection, UnrealscriptAdapterError> {
         log::info!("Connecting to port {port}");
 
-        // Connect to the unrealscript interface and set up the communications channel between
+        // Connect to the Unrealscript interface and set up the communications channel between
         // it and this adapter.
         Ok(TcpConnection::connect(port).await?)
     }
@@ -192,7 +194,7 @@ impl<C: AsyncClient + Unpin> DisconnectedAdapter<C> {
         match self.connect_to_interface(port).await {
             Ok(connection) => {
                 // Connection succeeded: Respond with a success response and return
-                // the conneted adapter.
+                // the connected adapter.
                 self.client.respond(Response::make_ack(req))?;
 
                 Ok(UnrealscriptAdapter::new(

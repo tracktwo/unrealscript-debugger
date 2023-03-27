@@ -40,7 +40,7 @@ pub enum EventBody {
 
     /// Output event. Used to send information to the client. Usually used to
     /// send log info to the editor's debug console, but is also used to send
-    /// update notices to the editor when there is a verson mismatch between the
+    /// update notices to the editor when there is a version mismatch between the
     /// adapter and interface.
     Output(OutputEventBody),
 

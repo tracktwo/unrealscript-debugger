@@ -48,7 +48,7 @@
 //! needing to wait for any given frame to be selected by the user. This is unsafe, and not just in
 //! the Rust terminology (although it is that too) because the data structures involved are not
 //! documented as part of the public interface and are subject to change. But since nobody is
-//! releasing Unreal 3.x games anymore and existing ones are no longer regluarly patched this
+//! releasing Unreal 3.x games anymore and existing ones are no longer regularly patched this
 //! should be safe enough for specific games with an opt-in mechanism.
 //!
 //! This has been tested with XCOM 2 War of the Chosen (64-bit) and XCOM: Enemy Within (32-bit),
@@ -145,7 +145,7 @@
 //! Another thing this function does is allocate and initialize the interface object. The pattern
 //! to search for here is:
 //!   - A call to some function that takes a relatively small constant as the first argument. This
-//!   is the alloation call, and in the UDK version I used it allocates 188 bytes. This seems
+//!   is the allocation call, and in the UDK version I used it allocates 188 bytes. This seems
 //!   reasonable and can be used to start fleshing out a struct type for the `DebuggerInterface`
 //!   object.
 //!   - This memory is then passed as an argument to some other function, which should be the
@@ -156,21 +156,21 @@
 //!
 //! From inside the interface ctor you can find the vtbl for the interface, note this too.
 //!
-//! Near the bottom of the the core ctor there is a virtual call through the interface's
-//! vtbl at index 0 that passes the debugger core instance as the next parameter afer the
+//! Near the bottom of the core ctor there is a virtual call through the interface's
+//! vtbl at index 0 that passes the debugger core instance as the next parameter after the
 //! interface 'this'. Go to the definition of the interface vtbl and jump to the first function
 //! in that table. In this function there is a test of something that looks like a flag against
 //! 0 (likely an "are we already initialized" test), and if it's zero it invokes a function
 //! and then makes 4 non-virtual but indirect calls through fields in the interface object.
 //! Finally there is virtual call outside the test.
 //!
-//! Jump to the directly called funtion and note the calls and strings: a call to `LoadLibrary`,
+//! Jump to the directly called function and note the calls and strings: a call to `LoadLibrary`,
 //! many calls to `GetProcAddress` with constants that name the various entry points to the
 //! interface DLL. This is the function that loads the external DLL and hooks up all the
 //! API entries and verifies we have been looking in the right spot so far.
 //!
 //! Next is to find the code responsible for switching call stacks. From this setup function
-//! we can see the call to `GetProcAddress` that loates `SetCallback` and stores it into the
+//! we can see the call to `GetProcAddress` that locates `SetCallback` and stores it into the
 //! interface object. Name this offset (in the UDK case it's at 0x80). Head back to the calling
 //! function (the virtual function in `DebuggerInstance` and you should now see that one of
 //! the indirect calls is through the offset that received the address of `SetCallback`. It
@@ -339,7 +339,7 @@ pub struct StackHack {
 unsafe impl Send for StackHack {}
 
 impl StackHack {
-    /// Create a new stackhack instance wtih the given model.
+    /// Create a new stackhack instance with the given model.
     ///
     /// This will attempt to locate the debugger core instance in the Unreal
     /// process.

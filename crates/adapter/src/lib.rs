@@ -55,7 +55,7 @@ pub enum UnrealscriptAdapterError {
     #[error("Limit exceeded: {0}")]
     LimitExceeded(String),
 
-    /// We failed to retreive the watch value for a particular expression.
+    /// We failed to retrieve the watch value for a particular expression.
     ///
     /// This error does not mean that the expression could not be evaluated: that
     /// returns a watch variable with an error string in the "value". This can
@@ -86,7 +86,7 @@ impl UnrealscriptAdapterError {
         }
     }
 
-    /// Convet an UnrealScriptAdapterError to a DAP error message suitable
+    /// Convert an UnrealScriptAdapterError to a DAP error message suitable
     /// for use as a body in an error response.
     pub fn to_error_message(&self) -> Message {
         Message {

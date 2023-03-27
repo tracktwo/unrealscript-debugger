@@ -42,7 +42,7 @@ macro_rules! expect_response {
 ///   commands from being sent at the same time.
 /// - next_response: To synchronously read a response from the interface to the adapter.
 ///   This blocks until a response has been received.
-/// - event_receiver: Returns a referene to a receiver that can be used to read events.
+/// - event_receiver: Returns a reference to a receiver that can be used to read events.
 ///   This channel is asynchronous.
 ///
 /// The trait also provides a higher-level interface of synchronous functions to manage
@@ -77,7 +77,7 @@ pub trait Connection: Send {
     /// from the interface. These are received asynchronously.
     fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent>;
 
-    /// Send an initialize request to the interface and retreive the response. Exchanges
+    /// Send an initialize request to the interface and retrieve the response. Exchanges
     /// version information and other config data.
     fn initialize(
         &mut self,
