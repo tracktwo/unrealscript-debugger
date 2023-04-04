@@ -76,6 +76,7 @@ pub struct IgnoredArguments {}
 /// These are almost entirely implementation-defined, and are usually populated
 /// from the launch configuration of the editor.
 #[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct AttachArguments {
     /// An ordered list of directories in which to search for source files. This is required
     /// so that we can tell the editor what file to open when the debugger breaks in some

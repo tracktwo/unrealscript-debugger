@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "adapter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bit_field",
  "bytes",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flexi_logger 0.25.3",
  "log",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "dap"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -422,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "interface"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "common",
  "flexi_logger 0.25.3",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "tests"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "adapter",
  "common",
