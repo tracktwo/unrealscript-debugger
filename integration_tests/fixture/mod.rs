@@ -7,11 +7,11 @@ use adapter::{
 };
 use common::{UnrealCommand, UnrealInterfaceMessage};
 use dap::events::Event;
-use futures::{executor, stream::SplitStream, SinkExt, StreamExt};
+use futures::{stream::SplitStream, SinkExt, StreamExt};
 use interface::debugger::Debugger;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::broadcast,
+    sync::mpsc::unbounded_channel,
 };
 use tokio_serde::formats::Json;
 use tokio_util::codec::LengthDelimitedCodec;
@@ -67,7 +67,7 @@ pub async fn setup_with_client<C: Client>(
     );
 
     log::trace!("Created adapter");
-    let (ctx, _crx) = broadcast::channel(1);
+    let (ctx, _crx) = unbounded_channel();
     let mut dbg = Debugger::new(ctx, None);
     let (stream, _addr) = tcp.accept().await.unwrap();
     log::trace!("Got connection");
@@ -81,7 +81,7 @@ pub async fn setup_with_client<C: Client>(
     let tcp_stream = tokio_serde::Framed::new(frame, format);
     let (mut tcp_tx, tcp_rx) = tcp_stream.split();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+    let (tx, mut rx) = unbounded_channel();
     dbg.new_connection(tx);
 
     // Spawn a task to monitor the receiving side of events and push them through the TCP
@@ -126,7 +126,7 @@ impl Client for TestClient {
     }
 
     fn send_event(&mut self, event: Event) -> Result<(), std::io::Error> {
-        executor::block_on(async { self.etx.send(event).unwrap() });
+        self.etx.send(event).unwrap();
         Ok(())
     }
 }

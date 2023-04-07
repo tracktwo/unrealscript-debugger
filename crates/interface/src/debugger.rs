@@ -4,12 +4,10 @@
 //! by Unreal and all the associated handler functions for managing calls from the
 //! Unreal API and calls from the connected adapter.
 use flexi_logger::LogSpecification;
-use futures::executor;
 use std::ffi::{c_char, CStr};
 use std::thread::JoinHandle;
 use thiserror::Error;
-use tokio::sync::broadcast::Sender;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 use winapi::um::stringapiset::{MultiByteToWideChar, WideCharToMultiByte};
 use winapi::um::winnls::{CP_ACP, CP_UTF8};
 
@@ -29,7 +27,7 @@ const DEFAULT_NARROW_CAPACITY: usize = 1024;
 
 /// A struct representing the debugger state.
 pub struct Debugger {
-    shutdown_sender: Sender<()>,
+    shutdown_sender: UnboundedSender<()>,
     handle: Option<JoinHandle<()>>,
     class_hierarchy: Vec<String>,
     local_watches: Vec<Watch>,
@@ -37,7 +35,7 @@ pub struct Debugger {
     user_watches: Vec<Watch>,
     callstack: Vec<Frame>,
     current_object_name: Option<String>,
-    response_channel: Option<tokio::sync::mpsc::Sender<UnrealInterfaceMessage>>,
+    response_channel: Option<tokio::sync::mpsc::UnboundedSender<UnrealInterfaceMessage>>,
     saw_show_dll: bool,
     pending_break_event: bool,
     current_line: i32,
@@ -150,7 +148,7 @@ impl Debugger {
     /// cannot safely call through the callback as callback calls can immediately re-enter the
     /// interface on the same thread, which would require us to re-acquire the debugger mutex while
     /// we already hold it to perform the callback.
-    pub fn new(ctx: Sender<()>, handle: Option<JoinHandle<()>>) -> Debugger {
+    pub fn new(ctx: UnboundedSender<()>, handle: Option<JoinHandle<()>>) -> Debugger {
         Debugger {
             shutdown_sender: ctx,
             handle,
@@ -468,15 +466,11 @@ impl Debugger {
     /// Send a response message. Since responses are always in reaction to a command, this requires
     /// a connected response channel and it is a logic error for this to not exist.
     pub fn send_response(&mut self, response: UnrealResponse) -> Result<(), DebuggerError> {
-        executor::block_on(async {
-            self.response_channel
-                .as_mut()
-                .ok_or(DebuggerError::NotConnected)?
-                .send(UnrealInterfaceMessage::Response(response))
-                .await
-                .or(Err(DebuggerError::NotConnected))?;
-            Ok(())
-        })?;
+        self.response_channel
+            .as_mut()
+            .ok_or(DebuggerError::NotConnected)?
+            .send(UnrealInterfaceMessage::Response(response))
+            .or(Err(DebuggerError::NotConnected))?;
         Ok(())
     }
 
@@ -518,11 +512,7 @@ impl Debugger {
             // we're not connected yet set a flag indicating that we're stopped so we can tell
             // the adapter about this state when it does connect.
             if let Some(channel) = &mut self.response_channel {
-                if let Err(e) = executor::block_on(async {
-                    channel
-                        .send(UnrealInterfaceMessage::Event(UnrealEvent::Stopped))
-                        .await
-                }) {
+                if let Err(e) = channel.send(UnrealInterfaceMessage::Event(UnrealEvent::Stopped)) {
                     log::error!("Sending stopped event failed: {e}");
                 }
             } else {
@@ -832,11 +822,7 @@ impl Debugger {
 
             // Unreal does not add newlines to log messages, add one for readability.
             str.push_str("\r\n");
-            if let Err(e) = executor::block_on(async {
-                sender
-                    .send(UnrealInterfaceMessage::Event(UnrealEvent::Log(str)))
-                    .await
-            }) {
+            if let Err(e) = sender.send(UnrealInterfaceMessage::Event(UnrealEvent::Log(str))) {
                 log::error!("Sending log failed: {e}");
             }
         } else {
@@ -1045,7 +1031,7 @@ impl Debugger {
 
     /// A new connection has been established from the adapter. Record the tcp stream used to send
     /// events.
-    pub fn new_connection(&mut self, tx: mpsc::Sender<UnrealInterfaceMessage>) {
+    pub fn new_connection(&mut self, tx: mpsc::UnboundedSender<UnrealInterfaceMessage>) {
         self.response_channel = Some(tx);
 
         // The debugger stopped before we connected (e.g. due to -autoDebug). Send a stopped
@@ -1069,14 +1055,14 @@ fn make_cstr<'a>(raw: *const c_char) -> &'a CStr {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::broadcast::channel;
+    use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
 
     #[test]
     fn adding_to_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy[0], "Package.Class");
@@ -1085,7 +1071,7 @@ mod tests {
     #[test]
     fn clearing_hierarchy() {
         let cls = "Package.Class\0".as_ptr() as *const i8;
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.add_class_to_hierarchy(cls);
         assert_eq!(dbg.class_hierarchy.len(), 1);
@@ -1097,7 +1083,7 @@ mod tests {
     fn add_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         assert_eq!(dbg.add_watch(WatchKind::Local, -1, name, val), 1);
         assert_eq!(dbg.local_watches.len(), 2);
@@ -1117,7 +1103,7 @@ mod tests {
     fn clear_watches_are_independent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(WatchKind::Local, -1, name, val);
         dbg.add_watch(WatchKind::Global, -1, name, val);
@@ -1133,16 +1119,16 @@ mod tests {
     fn add_watch_invalid_parent() {
         let name = "SomeVar\0".as_ptr() as *const i8;
         let val = "10\0".as_ptr() as *const i8;
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(WatchKind::Local, 1, name, val);
     }
 
     #[test]
     fn log_sends_line() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
         dbg.response_channel = Some(tx);
         let str = "This is a log line\0";
         dbg.add_line_to_log(str.as_ptr() as *const i8);
@@ -1159,7 +1145,7 @@ mod tests {
 
     #[test]
     fn add_frame() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.add_frame("Function MyPackage.Class:MyFunction\0".as_ptr() as *const i8);
         assert_eq!(dbg.callstack[0].qualified_name, "MyPackage.Class");
@@ -1168,7 +1154,7 @@ mod tests {
 
     #[test]
     fn empty_stacktrace() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         let response = dbg.handle_stacktrace_request(&StackTraceRequest {
             start_frame: 0,
@@ -1179,7 +1165,7 @@ mod tests {
 
     #[test]
     fn with_stacktrace() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
@@ -1214,7 +1200,7 @@ mod tests {
 
     #[test]
     fn partial_stacktrace_start() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
@@ -1242,7 +1228,7 @@ mod tests {
 
     #[test]
     fn partial_stacktrace_end() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
@@ -1270,7 +1256,7 @@ mod tests {
 
     #[test]
     fn partial_stacktrace_beyond() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.callstack.push(Frame {
             qualified_name: "Class1".to_string(),
@@ -1291,7 +1277,7 @@ mod tests {
 
     #[test]
     fn empty_watch_count() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         assert_eq!(dbg.watch_count(WatchKind::Local, 0), 0);
         assert_eq!(dbg.watch_count(WatchKind::Global, 0), 0);
@@ -1300,7 +1286,7 @@ mod tests {
 
     #[test]
     fn local_watch_count() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(
             WatchKind::Local,
@@ -1322,7 +1308,7 @@ mod tests {
 
     #[test]
     fn global_watch_count() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(
             WatchKind::Global,
@@ -1343,7 +1329,7 @@ mod tests {
 
     #[test]
     fn watch_counts_roots_only() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         dbg.add_watch(
             WatchKind::Global,
@@ -1380,7 +1366,7 @@ mod tests {
 
     #[test]
     fn simple_name() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         let str = "Location ( Struct,00007FF45D513A00,00007FF44F9B52F0 )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
@@ -1391,7 +1377,7 @@ mod tests {
 
     #[test]
     fn static_array_name() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         let str = "CharacterStats ( Static Struct Array )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
@@ -1402,7 +1388,7 @@ mod tests {
 
     #[test]
     fn dynamic_array_name() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         let str = "AWCAbilities ( Array )\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
@@ -1413,7 +1399,7 @@ mod tests {
 
     #[test]
     fn base_class_name() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         let str = "[[ Object ]]\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
@@ -1424,7 +1410,7 @@ mod tests {
 
     #[test]
     fn array_element_name() {
-        let (ctx, _) = channel(1);
+        let (ctx, _) = unbounded_channel();
         let mut dbg = Debugger::new(ctx, None);
         let str = "SomeArray[0]\0";
         let (name, ty, is_array) = dbg.decompose_name(str.as_ptr() as *const i8);
