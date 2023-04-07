@@ -2,14 +2,15 @@
 
 use common::{InitializeResponse, UnrealCommand, UnrealResponse, Version};
 use dap::{events::EventBody, events::OutputEventCategory};
-use futures::StreamExt;
+use tokio_stream::StreamExt;
 mod fixture;
 
 /// Test sending a log line from the interface to the adapter.
 #[tokio::test(flavor = "multi_thread")]
 async fn simple_log() {
-    let (client, mut erx, _rtx) = fixture::make_test_client();
-    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client).await;
+    let (client, erx) = fixture::make_test_client();
+    let (amtx, amrx) = std::sync::mpsc::channel();
+    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client, amtx, amrx).await;
 
     tokio::task::spawn(async move {
         // Fetch the initialized command and return a response.
@@ -29,13 +30,13 @@ async fn simple_log() {
         drop(comm);
     });
 
-    tokio::task::spawn(async move {
+    std::thread::spawn(move || {
         // We should get an initialized event first from construction of the adapter.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Initialized));
 
         // The adapter should receive the log event and dispatch it to the event sender.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         match &evt.body {
             EventBody::Output(obody) => {
                 assert!(matches!(obody.category, OutputEventCategory::Stdout));
@@ -45,7 +46,7 @@ async fn simple_log() {
         }
 
         // Finally we'll get a terminated event because we closed the interface connection.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Terminated));
     });
 
@@ -55,6 +56,5 @@ async fn simple_log() {
             minor: 0,
             patch: 0,
         })
-        .await
         .unwrap();
 }

@@ -1,11 +1,10 @@
-//! Asynchronous client for DAP
+//! Client for DAP
 //!
-//! This module defines the [`AsyncClient`] trait representing a connection to
-//! a DAP client that can communicate with the adapter in a partially
-//! asynchronous way.
+//! This module defines the [`Client`] trait representing a connection to
+//! a DAP client that can communicate with the adapter.
 //!
 //! It also provides an implementation of this trait that can communicate via
-//! a pair of objects that implement [`AsyncRead`] and [`AsyncWrite`].
+//! a pair of objects that implement [`Read`] and [`Write`].
 
 use std::{
     io::{BufRead, BufReader, BufWriter, Error, Read, Write},
@@ -21,11 +20,8 @@ use crate::AdapterMessage;
 
 /// The primary trait for communicating with a DAP client.
 ///
-/// This defines the protocol for communicating with the client to send and
-/// receive DAP messages. This protocol receives asynchronously but implements
-/// blocking sends. The blocking send behavior is helpful both to limit the
-/// async scope of the adapter as well as to help ensure we do not have any
-/// interleaved messages.
+/// This defines the protocol for communicating with the client to send
+/// DAP messages.
 pub trait Client {
     /// Synchronously send a response to the client. This will block until the
     /// message is sent.
@@ -45,11 +41,7 @@ pub trait Client {
     fn send_event(&mut self, event: Event) -> Result<(), Error>;
 }
 
-/// An implementation of [`AsyncClient`] for arbitrary asynchronous read/write
-/// streams.
-///
-/// Since the [`AsyncClient`] protocol is synchronous for sends the output side
-/// will be wrapped to block.
+/// An implementation of [`Client`] for arbitrary read/write streams.
 pub struct ClientImpl<W>
 where
     W: Write,
@@ -62,7 +54,12 @@ impl<W> ClientImpl<W>
 where
     W: Write,
 {
-    /// Construct a new [`AsyncClient`] from the given input reader and output writer.
+    /// Construct a new [`Client`] from the given input reader and output writer,
+    /// and the sending end of a channel we'll use to send request messages.
+    ///
+    /// The client spawns a thread that will monitor the given input stream,
+    /// translate the messages into DAP requests and dispatch them to the given
+    /// channel.
     pub fn new<R: Read + Send + 'static>(
         input: R,
         output: W,
@@ -90,7 +87,7 @@ where
         self.seq
     }
 
-    // Synchronously end a message to the client.
+    // Send a message to the client.
     //
     // `msg` is a json-encoded DAP message. This function will prepend the required
     // header.
@@ -143,6 +140,10 @@ where
     }
 }
 
+// The main loop for the client thread. This will read from the given input
+// stream, translate the incoming messages to DAP requests, and dispatch them
+// to the given sender. It will continue to do this until we read EOF from the
+// input stream indicating the editor has closed the connection.
 fn client_loop<R: Read>(
     mut input: BufReader<R>,
     sender: Sender<AdapterMessage>,

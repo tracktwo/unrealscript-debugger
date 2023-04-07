@@ -843,10 +843,6 @@ mod tests {
             unreachable!()
         }
 
-        fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent> {
-            unreachable!()
-        }
-
         fn add_breakpoint(&mut self, bp: Breakpoint) -> Result<Breakpoint, Error> {
             Ok(bp)
         }
