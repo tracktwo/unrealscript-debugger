@@ -9,9 +9,8 @@ use std::io::{Error, ErrorKind};
 
 use common::{
     Breakpoint, FrameIndex, InitializeRequest, StackTraceRequest, StackTraceResponse,
-    UnrealCommand, UnrealEvent, UnrealResponse, Variable, VariableIndex, Version, WatchKind,
+    UnrealCommand, UnrealResponse, Variable, VariableIndex, Version, WatchKind,
 };
-use tokio::sync::mpsc::Receiver;
 
 macro_rules! expect_response {
     ($e:expr, $p:path) => {
@@ -72,10 +71,6 @@ pub trait Connection: Send {
     ///
     /// Returns an I/O error if the response cannot be read.
     fn next_response(&mut self) -> Result<UnrealResponse, Error>;
-
-    /// Get a reference to the receiving end of a channel that will receive events
-    /// from the interface. These are received asynchronously.
-    fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent>;
 
     /// Send an initialize request to the interface and retrieve the response. Exchanges
     /// version information and other config data.

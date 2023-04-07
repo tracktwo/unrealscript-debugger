@@ -1,21 +1,15 @@
 //! TCP-based connection to Unreal
 
 use std::{
-    io::{Error, ErrorKind},
+    io::{Error, ErrorKind, Read, Write},
+    net::TcpStream,
+    sync::mpsc::{channel, Receiver, Sender},
     time::Duration,
 };
 
-use common::{UnrealCommand, UnrealEvent, UnrealInterfaceMessage, UnrealResponse};
-use futures::SinkExt;
-use tokio::{
-    net::TcpStream,
-    select,
-    sync::mpsc::{channel, Receiver, Sender},
-    task::JoinHandle,
-};
-use tokio_serde::formats::Json;
-use tokio_stream::StreamExt;
-use tokio_util::codec::LengthDelimitedCodec;
+use common::{UnrealCommand, UnrealInterfaceMessage, UnrealResponse};
+
+use crate::AdapterMessage;
 
 use super::Connection;
 
@@ -27,34 +21,29 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// A TCP-based connection between the debug adapter and the Unreal debugger
 /// interface.
 pub struct TcpConnection {
+    tcp_stream: TcpStream,
     response_receiver: Receiver<UnrealResponse>,
-    command_sender: Sender<UnrealCommand>,
-    event_receiver: Receiver<UnrealEvent>,
-    handle: JoinHandle<()>,
-}
-
-impl Drop for TcpConnection {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
 }
 
 impl TcpConnection {
     /// Connect to an unreal debugger adapter running at the given port number on the local computer.
-    pub async fn connect(port: u16) -> Result<TcpConnection, Error> {
+    pub fn connect(
+        port: u16,
+        event_sender: Sender<AdapterMessage>,
+    ) -> Result<TcpConnection, Error> {
         let mut tcp: Option<TcpStream> = None;
 
         // Try to connect, sleeping between attempts. This sleep is intended to give
         // enough time for a launched Unreal process to get to the point where the
         // interface has opened the listening socket.
         for _ in 0..CONNECT_ATTEMPTS {
-            match TcpStream::connect(format!("127.0.0.1:{port}")).await {
+            match TcpStream::connect(format!("127.0.0.1:{port}")) {
                 Ok(s) => {
                     tcp = Some(s);
                     break;
                 }
                 Err(_) => {
-                    tokio::time::sleep(CONNECT_TIMEOUT).await;
+                    std::thread::sleep(CONNECT_TIMEOUT);
                 }
             }
         }
@@ -66,39 +55,41 @@ impl TcpConnection {
 
         // Create channels to manage sending commands to and receiving events from the
         // interface TCP connection.
-        let (ctx, crx) = channel(128);
-        let (rtx, rrx) = channel(128);
-        let (etx, erx) = channel(128);
+        let (rtx, rrx) = channel();
 
-        // Spawn a new task to manage these channels and the TCP connection.
-        let handle = tokio::spawn(async { debuggee_tcp_loop(tcp, rtx, etx, crx).await });
+        let tcp_clone = tcp.try_clone().unwrap();
+        // Spawn a new thread to manage these channels and the TCP connection.
+        std::thread::spawn(|| debuggee_tcp_loop(tcp_clone, rtx, event_sender));
         Ok(TcpConnection {
             response_receiver: rrx,
-            command_sender: ctx,
-            event_receiver: erx,
-            handle,
+            tcp_stream: tcp,
         })
     }
 }
 
 impl Connection for TcpConnection {
     fn send_command(&mut self, command: UnrealCommand) -> Result<(), Error> {
-        futures::executor::block_on(self.command_sender.send(command))
-            .map_err(|e| Error::new(ErrorKind::ConnectionReset, e))
+        log::trace!("Sending command {command:?}");
+        let buf = serde_json::ser::to_vec(&command)?;
+        let msg_len = buf.len() as u32;
+        let size_buf = msg_len.to_be_bytes();
+        log::trace!("{} bytes became prefix {size_buf:?}", buf.len());
+        self.tcp_stream.write_all(&size_buf)?;
+        self.tcp_stream.write_all(&buf).map(|_| ())
     }
 
     fn next_response(&mut self) -> Result<UnrealResponse, Error> {
         log::trace!("Waiting for next response...");
-        let resp = futures::executor::block_on(self.response_receiver.recv()).ok_or(Error::new(
-            ErrorKind::ConnectionReset,
-            "Error reading next response",
-        ));
-        log::trace!("Got response {resp:?}");
-        resp
-    }
-
-    fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent> {
-        &mut self.event_receiver
+        match self.response_receiver.recv() {
+            Ok(resp) => {
+                log::trace!("Got response {resp:?}");
+                Ok(resp)
+            }
+            Err(_) => Err(std::io::Error::new(
+                ErrorKind::ConnectionReset,
+                "Error reading next response",
+            )),
+        }
     }
 }
 
@@ -107,79 +98,58 @@ impl Connection for TcpConnection {
 /// This is intended to be spawned as an independent task which will coordinate
 /// communication between the interface's socket and the main debugger adapter.
 /// This communication is done via channels.
-async fn debuggee_tcp_loop(
-    tcp: TcpStream,
+fn debuggee_tcp_loop(
+    mut tcp: TcpStream,
     response_sender: Sender<UnrealResponse>,
-    event_sender: Sender<UnrealEvent>,
-    mut command_receiver: Receiver<UnrealCommand>,
+    event_sender: Sender<AdapterMessage>,
 ) {
     // Adapt the tcp socket into an asymmetrical source + sink for Json objects.
     // Across this TCP socket we will send UnrealCommands to the interface, and
     // receive UnrealEvents from that interface. These will always be length-delimited.
 
-    // Construct a frame codec using length-delimited fields.
-    let frame = tokio_util::codec::Framed::new(tcp, LengthDelimitedCodec::new());
-
-    // Build a json formatter that can deserialize events and serialize commands.
-    let format: Json<UnrealInterfaceMessage, UnrealCommand> = Json::default();
-
-    // Build a source + sink for that Json format on top of our framing system.
-    let mut tcp_stream = tokio_serde::Framed::new(frame, format);
-
     loop {
-        select! {
-            event = tcp_stream.next() => {
-                match event {
-                    Some(Ok(UnrealInterfaceMessage::Event(event))) => {
-                        // We've received an event from the interface. Send it along to the
-                        // adapter's main processing loop where it will decode the event and
-                        // decide what to do with it. The receiving side must still be alive
-                        // since it's tied to the lifetime of the connection object which
-                        // would have aborted this task if it was dropping.
-                        event_sender.send(event).await.expect("Event receiver must still be alive");
-                    },
-                    Some(Ok(UnrealInterfaceMessage::Response(resp))) => {
-                        // We've received an event from the interface. Send it along to the
-                        // adapter. See above for the rationale why expect is safe here.
-                        response_sender.send(resp).await.expect("Response receiver must still be alive");
-                    },
-                    Some(Err(e)) => {
-                        // An error has occurred.
-                        log::error!("Error receiving event from interface: {e}");
-                        return;
-                    }
-                    None => {
-                        // The connection has closed. If this was a graceful shutdown
-                        // we should have received a shutdown event first and dispatched
-                        // it to the adapter. Or, perhaps Unreal has crashed.
-                        log::info!("Connection closed from interface.");
-                        return;
-                    }
-                };
+        let mut size_buf = [0u8; 4];
+        match tcp.read_exact(&mut size_buf) {
+            Ok(()) => {
+                log::trace!("Read size bytes from socket: {size_buf:?}");
             }
-            command = command_receiver.recv() => {
-                match command {
-                    Some(command) => {
-                        // We've received a command from the adapter. Send it to the
-                        // interface. When this happens we'll log the error and return,
-                        // which will drop the sending portions of the response and event
-                        // channels that we own. This will be detected either by the
-                        // main adapter loop.
-                        match tcp_stream.send(command).await {
-                            Ok(()) => {},
-                            Err(e) => {
-                                log::error!("IO error sending command to Unreal: {e}");
-                                return;
-                            }
-                        } ;
-                    },
-                    None => {
-                        // The adapter has dropped the sending part of this stream.
-                        // This should never happen since we abort this task in the destructor
-                        // for the connection object before the command sender is dropped.
-                        unreachable!("TCP task should be cancelled before the sender drops");
-                    }
+            Err(_) => {
+                // Failed to read bytes from the TCP socket. This is not necessarily
+                // an error, the interface will close the connection when it disconnects.
+                log::info!("Received EOF from interface. Closing connection.");
+                if event_sender.send(AdapterMessage::Shutdown).is_err() {
+                    log::error!("Failed to send shutdown event to adapter.");
                 }
+                return;
+            }
+        };
+        let sz = u32::from_be_bytes(size_buf);
+        let mut msg_buf = vec![0; sz as usize];
+        match tcp.read_exact(&mut msg_buf) {
+            Ok(()) => (),
+            Err(e) => {
+                log::error!("Error reading msg from interface: {e}");
+            }
+        };
+        match serde_json::from_slice(&msg_buf) {
+            Ok(UnrealInterfaceMessage::Event(event)) => {
+                if event_sender.send(AdapterMessage::Event(event)).is_err() {
+                    log::error!("Failed to send event to adapter.");
+                    return;
+                }
+            }
+            Ok(UnrealInterfaceMessage::Response(resp)) => {
+                if response_sender.send(resp).is_err() {
+                    log::error!("Failed to send response to adapter.");
+                    return;
+                }
+            }
+            Err(e) => {
+                log::error!("Error from Unreal connection: {e}");
+                if event_sender.send(AdapterMessage::Shutdown).is_err() {
+                    log::error!("Failed to send shutdown event to adapter.");
+                }
+                return;
             }
         }
     }

@@ -5,7 +5,10 @@
 //! with the debuggee are established this transforms to a ['ConnectedAdapter'] to
 //! manage the rest of the debugging session.
 
-use std::process::Child;
+use std::{
+    process::Child,
+    sync::mpsc::{Receiver, Sender},
+};
 
 use common::{DEFAULT_PORT, PORT_VAR};
 use dap::{
@@ -14,18 +17,19 @@ use dap::{
     types::Capabilities,
 };
 use flexi_logger::LogSpecification;
-use tokio::{pin, select};
 
 use crate::{
-    async_client::AsyncClient, client_config::ClientConfig, comm::tcp::TcpConnection,
-    connected_adapter::UnrealscriptAdapter, UnrealscriptAdapterError, _LOGGER,
+    client::Client, client_config::ClientConfig, comm::tcp::TcpConnection,
+    connected_adapter::UnrealscriptAdapter, AdapterMessage, UnrealscriptAdapterError, _LOGGER,
 };
 
 /// A representation of a disconnected adapter. This manages the portion of the
 /// protocol up to the point where a connection to the debuggee is established.
-pub struct DisconnectedAdapter<C: AsyncClient> {
+pub struct DisconnectedAdapter<C: Client> {
     client: C,
     config: ClientConfig,
+    sender: Sender<AdapterMessage>,
+    receiver: Receiver<AdapterMessage>,
 }
 
 /// Error cases for a disconnected adapter.
@@ -39,7 +43,7 @@ pub struct DisconnectedAdapter<C: AsyncClient> {
 /// - If we fail to launch or attach, receive a disconnect request from the client, or
 /// receive unexpected protocol messages from the client we may fail to connect but
 /// can continue processing messages and may be able to connect in the future.
-pub enum DisconnectedAdapterError<C: AsyncClient> {
+pub enum DisconnectedAdapterError<C: Client> {
     /// Represents a fatal error communicating with the client. There is no way to
     /// continue to attempt connection since no more instructions will come from the
     /// client or we can't send any responses. The adapter should give up when
@@ -52,15 +56,19 @@ pub enum DisconnectedAdapterError<C: AsyncClient> {
     NoConnection(DisconnectedAdapter<C>),
 }
 
-impl<C: AsyncClient> From<std::io::Error> for DisconnectedAdapterError<C> {
+impl<C: Client> From<std::io::Error> for DisconnectedAdapterError<C> {
     fn from(e: std::io::Error) -> Self {
         DisconnectedAdapterError::IoError(e)
     }
 }
 
-impl<C: AsyncClient> DisconnectedAdapter<C> {
+impl<C: Client> DisconnectedAdapter<C> {
     /// Create a new disconnected adapter for the given client.
-    pub fn new(client: C) -> Self {
+    pub fn new(
+        client: C,
+        sender: Sender<AdapterMessage>,
+        receiver: Receiver<AdapterMessage>,
+    ) -> Self {
         DisconnectedAdapter {
             client,
             config: ClientConfig {
@@ -71,43 +79,61 @@ impl<C: AsyncClient> DisconnectedAdapter<C> {
                 enable_stack_hack: false,
                 auto_resume: false,
             },
+            sender,
+            receiver,
         }
     }
 
     /// Process protocol messages until we have launched or connected to
     /// the debuggee process, then return an UnrealscriptAdapter instance to
     /// manage the rest of the session.
-    pub async fn connect(mut self) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
+    pub fn connect(mut self) -> Result<UnrealscriptAdapter<C>, DisconnectedAdapterError<C>> {
         loop {
-            let req_fut = self.client.next_request();
-            pin!(req_fut);
-            select! {
-                request = req_fut => {
+            match self.receiver.recv() {
+                Ok(AdapterMessage::Request(request)) => {
                     log::trace!("Received request: {request:?}");
-                    match request {
-                        Some(Ok(request)) => {
-                            match &request.command {
-                                Command::Initialize(args) => self.initialize(&request, args)?,
-                                Command::Attach(args) => return self.attach(&request, args).await,
-                                Command::Launch(args) => return self.launch(&request, args).await,
-                                Command::Disconnect(_) => {
-                                    log::info!("Received disconnect message during connection phase.");
-                                    return Err(DisconnectedAdapterError::NoConnection(self));
-                                },
-                                // No other requests are expected in the disconnected state.
-                                cmd => {
-                                    log::error!("Unexpected command {} in disconnected state.", cmd.to_string());
-                                    //
-                                    self.client.respond(Response::make_error(&request, "Unhandled Command".to_string(),
-                                            UnrealscriptAdapterError::UnhandledCommand(cmd.to_string()).to_error_message()
-                                    ))?;
-                                }
-                            }
-                        },
-                        Some(Err(e)) => return Err(DisconnectedAdapterError::IoError(e)),
-                        None => return Err(DisconnectedAdapterError::IoError(
-                            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "Client closed connection."))),
-                    }
+                    match &request.command {
+                        Command::Initialize(args) => self.initialize(&request, args)?,
+                        Command::Attach(args) => return self.attach(&request, args),
+                        Command::Launch(args) => return self.launch(&request, args),
+                        Command::Disconnect(_) => {
+                            log::info!("Received disconnect message during connection phase.");
+                            return Err(DisconnectedAdapterError::NoConnection(self));
+                        }
+                        // No other requests are expected in the disconnected state.
+                        cmd => {
+                            log::error!(
+                                "Unexpected command {} in disconnected state.",
+                                cmd.to_string()
+                            );
+                            //
+                            self.client.respond(Response::make_error(
+                                &request,
+                                "Unhandled Command".to_string(),
+                                UnrealscriptAdapterError::UnhandledCommand(cmd.to_string())
+                                    .to_error_message(),
+                            ))?;
+                        }
+                    };
+                }
+                Ok(AdapterMessage::Event(evt)) => {
+                    return Err(DisconnectedAdapterError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Received event {evt:?} in disconnected state."),
+                    )));
+                }
+                Ok(AdapterMessage::Shutdown) => {
+                    log::info!("Adapter received shutdown message.");
+                    return Err(DisconnectedAdapterError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "Connection to DAP has dropped.",
+                    )));
+                }
+                Err(_) => {
+                    return Err(DisconnectedAdapterError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "Connection to DAP has dropped.",
+                    )));
                 }
             }
         }
@@ -144,15 +170,12 @@ impl<C: AsyncClient> DisconnectedAdapter<C> {
 
     /// Connect to the debugger interface. When connected this will send an 'initialized' event to
     /// DAP. This is shared by both the 'launch' and 'attach' requests.
-    async fn connect_to_interface(
-        &self,
-        port: u16,
-    ) -> Result<TcpConnection, UnrealscriptAdapterError> {
+    fn connect_to_interface(&self, port: u16) -> Result<TcpConnection, UnrealscriptAdapterError> {
         log::info!("Connecting to port {port}");
 
         // Connect to the Unrealscript interface and set up the communications channel between
         // it and this adapter.
-        Ok(TcpConnection::connect(port).await?)
+        Ok(TcpConnection::connect(port, self.sender.clone())?)
     }
 
     /// Attach to a running unreal process.
@@ -164,7 +187,7 @@ impl<C: AsyncClient> DisconnectedAdapter<C> {
     ///
     /// Returns an io error if we are unable to send a response to the client's output
     /// channel.
-    async fn attach(
+    fn attach(
         mut self,
         req: &Request,
         args: &AttachArguments,
@@ -191,7 +214,7 @@ impl<C: AsyncClient> DisconnectedAdapter<C> {
         let port = DEFAULT_PORT;
         self.config.source_roots = args.source_roots.clone().unwrap_or_default();
         self.config.enable_stack_hack = args.enable_stack_hack.unwrap_or(true);
-        match self.connect_to_interface(port).await {
+        match self.connect_to_interface(port) {
             Ok(connection) => {
                 // Connection succeeded: Respond with a success response and return
                 // the connected adapter.
@@ -199,6 +222,7 @@ impl<C: AsyncClient> DisconnectedAdapter<C> {
 
                 Ok(UnrealscriptAdapter::new(
                     self.client,
+                    self.receiver,
                     self.config,
                     Box::new(connection),
                     None,
@@ -313,7 +337,7 @@ impl<C: AsyncClient> DisconnectedAdapter<C> {
     /// the connection was a failure we will also send the appropriate response
     /// error to the client, but these two states are indistinguishable to the
     /// caller.
-    async fn launch(
+    fn launch(
         mut self,
         req: &Request,
         args: &LaunchArguments,
@@ -350,7 +374,7 @@ impl<C: AsyncClient> DisconnectedAdapter<C> {
             Ok(child) => {
                 // If we're auto-debugging we can now connect to the interface.
                 if auto_debug {
-                    match self.connect_to_interface(port).await {
+                    match self.connect_to_interface(port) {
                         Ok(connection) => {
                             // Send a response ack for the launch request.
                             self.client.respond(Response::make_ack(req))?;
@@ -361,6 +385,7 @@ impl<C: AsyncClient> DisconnectedAdapter<C> {
 
                             Ok(UnrealscriptAdapter::new(
                                 self.client,
+                                self.receiver,
                                 self.config,
                                 Box::new(connection),
                                 Some(child),
