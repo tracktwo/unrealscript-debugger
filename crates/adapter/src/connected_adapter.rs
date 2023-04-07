@@ -123,15 +123,8 @@ where
         }
     }
 
-    /// Main loop of the adapter process. This monitors several different communications
-    /// channels and dispatches messages:
-    ///
-    /// - Watch the client for incoming requests and send back a response.
-    /// - Watch the interface's event queue for incoming events, translate them
-    ///   and push them into the adapter's event queue.
-    /// - Watch the adapter event queue and push events to the client.
-    /// - Watch the control queue for shutdown messages, closing the loop if we
-    ///   get one.
+    /// Main loop of the adapter process. This monitors the input message channel
+    /// which on which both DAP requests and interface events can appear.
     ///
     /// # Errors
     ///
@@ -171,9 +164,13 @@ where
             body: EventBody::Initialized,
         })?;
 
+        // The main loop: monitor the input channel and handle requests and events as
+        // they come in.
         loop {
             match self.receiver.recv() {
                 Ok(AdapterMessage::Request(request)) => {
+                    // We received a request from the DAP client. Process it and
+                    // send a response.
                     let response = match self.accept(&request) {
                         Ok(Some(body)) => Response::make_success(&request, body),
                         Ok(None) => Response::make_ack(&request),
@@ -205,6 +202,10 @@ where
                     };
                 }
                 Ok(AdapterMessage::Shutdown) => {
+                    // One of the endpoints has indicated that the session is ending. This
+                    // can come from DAP when the user closes the session from the editor,
+                    // or it can come from the interface if the user closes the game or
+                    // uses \toggledebugger to shut down the session.
                     log::info!("Shutdown message received. Stopping adapter.");
                     self.client.send_event(Event {
                         body: EventBody::Terminated,
