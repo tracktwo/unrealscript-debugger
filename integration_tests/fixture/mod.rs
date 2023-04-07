@@ -27,13 +27,20 @@ pub type TcpFrame = tokio_serde::Framed<
 /// - construct an adapter and client
 /// - Create a channel to receive events and hook this up to the client
 /// - open a TCP listener for a mock interface on a random port.
-/// - Spawn a thread to process messages on that port and dispatch them to the provided closure
-/// - Initialize communication between the two by sending an initialize and attach request.
+/// - Spawns a task that will monitor the debugger object's event channel and
+///   push them through the TCP connection.
 ///
-/// Returns the adapter, client, the receiving end of the event channel, and a join handle for the thread.
+/// Returns the adapter, debugger, and the receiving end of the debugger's TCP channel.
 ///
-/// Test cases can now send requests and receive responses through the adapter. Events sent from
-/// the closure will appear in the event receiver.
+/// Test cases can then spawn an async task to process the debugger: this task is
+/// responsible for reading commands from the returned TCP stream and feeding them
+/// to the debugger instance in the order it wants them to appear, and can also initiate
+/// events by interacting with the debugger object.
+///
+/// Test cases can also interact with the adapter to send requests and inspect responses
+/// with the accept function, or can spawn a dedicated thread to interact with the client
+/// by writing to the client's input stream and have the test case run the normal adapter
+/// event loop.
 
 pub async fn setup_with_client<C: Client>(
     client: C,
@@ -124,8 +131,7 @@ impl Client for TestClient {
     }
 }
 
-/// Create a test client and return it, a channel to receive events from it, and a channel to send
-/// requests to it.
+/// Create a test client and return it and a channel to receive events from it.
 #[allow(dead_code)]
 pub fn make_test_client() -> (TestClient, std::sync::mpsc::Receiver<Event>) {
     let (etx, erx) = std::sync::mpsc::channel();
