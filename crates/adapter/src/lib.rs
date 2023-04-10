@@ -7,10 +7,11 @@
 
 use std::sync::RwLock;
 
-use dap::types::Message;
+use common::UnrealEvent;
+use dap::{requests::Request, types::Message};
 use flexi_logger::LoggerHandle;
 use thiserror::Error;
-pub mod async_client;
+pub mod client;
 pub mod client_config;
 pub mod comm;
 pub mod connected_adapter;
@@ -95,4 +96,16 @@ impl UnrealscriptAdapterError {
             show_user: true,
         }
     }
+}
+
+/// A message type for the adapter's main loop. This can be fed DAP requests
+/// from the DAP client, or UnrealEvents from the interface.
+#[derive(Debug)]
+pub enum AdapterMessage {
+    /// A request from DAP
+    Request(Request),
+    /// An event from the interface
+    Event(UnrealEvent),
+    /// The client has closed the connection.
+    Shutdown,
 }

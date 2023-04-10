@@ -44,10 +44,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     runtime::Builder,
     select,
-    sync::{
-        broadcast::{self, Receiver},
-        mpsc,
-    },
+    sync::mpsc::{self, unbounded_channel, UnboundedReceiver},
 };
 use tokio_serde::formats::SymmetricalJson;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -80,7 +77,7 @@ pub fn initialize(cb: UnrealCallback) {
         // debugger instance owns the tx side and can send the event when this happens.
         // The separate thread we spawn below owns the receiving side and uses this to
         // cleanly stop itself.
-        let (ctx, crx) = broadcast::channel(10);
+        let (ctx, crx) = unbounded_channel();
 
         // Start the main loop that will listen for connections so we can
         // communicate the debugger state to the adapter. This will spin up a
@@ -145,7 +142,10 @@ fn determine_port() -> u16 {
 
 /// The main worker thread for the debugger interface. This is created when the
 /// debugger session is created, and returns when the debugger session ends.
-async fn main_loop(cb: UnrealCallback, mut crx: Receiver<()>) -> Result<(), tokio::io::Error> {
+async fn main_loop(
+    cb: UnrealCallback,
+    mut crx: UnboundedReceiver<()>,
+) -> Result<(), tokio::io::Error> {
     let port = determine_port();
 
     log::info!("Listening for connections on port {port}");
@@ -184,12 +184,12 @@ async fn main_loop(cb: UnrealCallback, mut crx: Receiver<()>) -> Result<(), toki
 async fn handle_connection(
     stream: &mut TcpStream,
     cb: UnrealCallback,
-    crx: &mut Receiver<()>,
+    crx: &mut UnboundedReceiver<()>,
 ) -> Result<ConnectionResult, tokio::io::Error> {
     // Create a new message passing channel and send the sender to the debugger.
     // It's convenient to have a per-connection message channel as it also serves
     // as an indicator within the debugger to tell if the interface is connected.
-    let (etx, mut erx) = mpsc::channel(128);
+    let (etx, mut erx) = mpsc::unbounded_channel();
 
     {
         let mut hnd = DEBUGGER.lock().unwrap();

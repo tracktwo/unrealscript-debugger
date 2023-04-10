@@ -11,6 +11,7 @@ use std::{
     num::TryFromIntError,
     path::{Component, Path},
     process::Child,
+    sync::mpsc::Receiver,
 };
 
 use common::{
@@ -33,11 +34,10 @@ use dap::{
     },
     types::{Scope, Source, StackFrame, Thread, VariableReferenceInfo},
 };
-use tokio::{select, sync::broadcast};
 
 use crate::{
-    async_client::AsyncClient, client_config::ClientConfig, comm::Connection,
-    variable_reference::VariableReference, UnrealscriptAdapterError,
+    client::Client, client_config::ClientConfig, comm::Connection,
+    variable_reference::VariableReference, AdapterMessage, UnrealscriptAdapterError,
 };
 
 /// The thread ID to use for the Unrealscript thread. The unreal debugger only supports one thread.
@@ -78,22 +78,17 @@ impl ClassInfo {
 }
 
 /// A connected Unrealscript debug adapter.
-pub struct UnrealscriptAdapter<C: AsyncClient> {
+pub struct UnrealscriptAdapter<C: Client> {
     client: C,
+    receiver: Receiver<AdapterMessage>,
     config: ClientConfig,
     connection: Box<dyn Connection>,
     class_map: BTreeMap<String, ClassInfo>,
-    control: Option<broadcast::Sender<ControlMessage>>,
     child: Option<Child>,
     overridden_log_level: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ControlMessage {
-    Shutdown,
-}
-
-impl<C: AsyncClient> Drop for UnrealscriptAdapter<C> {
+impl<C: Client> Drop for UnrealscriptAdapter<C> {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             log::trace!("Killing child process.");
@@ -106,11 +101,12 @@ impl<C: AsyncClient> Drop for UnrealscriptAdapter<C> {
 
 impl<C> UnrealscriptAdapter<C>
 where
-    C: AsyncClient,
+    C: Client,
 {
     /// Construct a new connected adapter.
     pub fn new(
         client: C,
+        receiver: Receiver<AdapterMessage>,
         config: ClientConfig,
         connection: Box<dyn Connection>,
         child: Option<Child>,
@@ -120,32 +116,21 @@ where
             class_map: BTreeMap::new(),
             connection,
             client,
+            receiver,
             config,
-            control: None,
             child,
             overridden_log_level,
         }
     }
 
-    /// Main loop of the adapter process. This monitors several different communications
-    /// channels and dispatches messages:
-    ///
-    /// - Watch the client for incoming requests and send back a response.
-    /// - Watch the interface's event queue for incoming events, translate them
-    ///   and push them into the adapter's event queue.
-    /// - Watch the adapter event queue and push events to the client.
-    /// - Watch the control queue for shutdown messages, closing the loop if we
-    ///   get one.
+    /// Main loop of the adapter process. This monitors the input message channel
+    /// which on which both DAP requests and interface events can appear.
     ///
     /// # Errors
     ///
     /// This function returns an i/o error only in unrecoverable scenarios,
     /// typically if the client or interface communication channels have closed.
-    pub async fn process_messages(&mut self, version: Version) -> Result<(), std::io::Error> {
-        // Set up the control channel
-        let (ctx, mut crx) = broadcast::channel(10);
-        self.control = Some(ctx);
-
+    pub fn process_messages(&mut self, version: Version) -> Result<(), std::io::Error> {
         // Perform the initialization handshake with the interface to exchange version info.
         // We can't proceed if we fail to manage this initialization protocol.
         let interface_version = self.connection.initialize(
@@ -179,79 +164,63 @@ where
             body: EventBody::Initialized,
         })?;
 
+        // The main loop: monitor the input channel and handle requests and events as
+        // they come in.
         loop {
-            select! {
-                request = self.client.next_request() => {
-                    match request {
-                        Some(Ok(request)) => {
-                            let response = match self.accept(&request) {
-                                Ok(Some(body)) => Response::make_success(&request, body),
-                                Ok(None) => Response::make_ack(&request),
-                                // An error from the request processing code is recoverable. Send
-                                // an error response to the client so it may display it.
-                                Err(e) => {
-                                    log::error!("Error processing request: {e}");
-                                    Response::make_error(&request, "Request Error".to_string(), e.to_error_message())
-                                },
-                            };
-                            // Failing to send the response is unrecoverable. This indicates
-                            // the client connection has closed so we can never send any more
-                            // responses or events.
-                            self.client.respond(response)?;
-                        },
-                        // A 'None' from the client means the connection is closed and no
-                        // more requests will come. Seeing this without a previous disconnect
-                        // message is an error (e.g. the editor crashed?). We can return and
-                        // shut down -- this is unrecoverable because we no longer have a
-                        // connection to the client.
-                        None => return Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "Client request stream has closed")),
-                        // An error response from the client indicates some kind of framing or
-                        // protocol error at the DAP level. This is not generally recoverable
-                        // since the client is waiting for a response to the message that we
-                        // failed to decode, and we can't prepare that response because we don't
-                        // know the request id to use in it.
-                        Some(Err(e)) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-                    }
+            match self.receiver.recv() {
+                Ok(AdapterMessage::Request(request)) => {
+                    // We received a request from the DAP client. Process it and
+                    // send a response.
+                    let response = match self.accept(&request) {
+                        Ok(Some(body)) => Response::make_success(&request, body),
+                        Ok(None) => Response::make_ack(&request),
+                        // An error from the request processing code is recoverable. Send
+                        // an error response to the client so it may display it.
+                        Err(e) => {
+                            log::error!("Error processing request: {e}");
+                            Response::make_error(
+                                &request,
+                                "Request Error".to_string(),
+                                e.to_error_message(),
+                            )
+                        }
+                    };
+                    // Failing to send the response is unrecoverable. This indicates
+                    // the client connection has closed so we can never send any more
+                    // responses or events.
+                    self.client.respond(response)?;
                 }
-                evt = self.connection.event_receiver().recv() => {
+                Ok(AdapterMessage::Event(evt)) => {
                     // We received an event from the interface. Translate it to
                     // a DAP event and send to the client.
-                    match evt {
-                        Some(evt) => {
-                            log::trace!("Received unreal event {evt:?}");
-                            if let Some(dap_event) = self.process_event(evt) {
-                                self.client.send_event(dap_event)?;
-                            }
-                            // Receiving 'None' from process_event is not an error,
-                            // it can indicate that we have received a shutdown event
-                            // and this will be sent in the control queue handler below.
-                        },
+                    log::trace!("Received unreal event {evt:?}");
+                    match self.process_event(evt) {
+                        Some(dap_event) => self.client.send_event(dap_event)?,
                         None => {
-                            // The remote side has closed the connection, so we have to
-                            // stop. Send a terminated event to the client and exit the
-                            // loop.
-                            log::info!("Debuggee has closed the event connection socket.");
-                            self.client.send_event(Event{
-                                body: EventBody::Terminated
-                            })?;
-                            return Ok(());
+                            continue;
                         }
                     };
                 }
-                ctrl = crx.recv() => {
-                    match ctrl {
-                        Ok(ControlMessage::Shutdown) => {
-                            log::info!("Shutdown message received. Stopping adapter.");
-                            self.client.send_event(Event{
-                                body: EventBody::Terminated
-                            })?;
-                            return Ok(());
-                        },
-                        Err(broadcast::error::RecvError::Closed) => unreachable!(),
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            log::error!("Control queue full!");
-                        },
-                    };
+                Ok(AdapterMessage::Shutdown) => {
+                    // One of the endpoints has indicated that the session is ending. This
+                    // can come from DAP when the user closes the session from the editor,
+                    // or it can come from the interface if the user closes the game or
+                    // uses \toggledebugger to shut down the session.
+                    log::info!("Shutdown message received. Stopping adapter.");
+                    self.client.send_event(Event {
+                        body: EventBody::Terminated,
+                    })?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Getting a RecvError means all senders have shut down. This
+                    // is very unlikely and means that somehow both the TCP connection
+                    // and the DAP client connection failed simultaneously. Regardless,
+                    // we can't do anything more since we can't talk to either end.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "Error reading from both dap client and unreal connection.",
+                    ));
                 }
             };
         }
@@ -780,16 +749,11 @@ where
             }
             UnrealEvent::Disconnect => {
                 // We've received a disconnect event from interface. This means
-                // the connection is shutting down. Send the shutdown control
-                // message to our control channel so it can cleanly close down
-                // the processing loop. We don't return a DAP event here as we
-                // will send a terminate event when we close down the loop.
-                self.control
-                    .as_ref()
-                    .unwrap()
-                    .send(ControlMessage::Shutdown)
-                    .expect("Control channel cannot drop");
-                None
+                // the connection is shutting down. Send a terminated event to the
+                // client.
+                Some(Event {
+                    body: EventBody::Terminated,
+                })
             }
         }
     }
@@ -844,16 +808,15 @@ pub fn split_source(path_str: &str) -> Result<(String, String), BadFilenameError
 #[cfg(test)]
 mod tests {
 
-    use std::io::Error;
+    use std::{
+        io::{Error, Stdout},
+        sync::mpsc::{channel, Sender},
+    };
 
     use common::{UnrealCommand, UnrealResponse};
     use dap::types::{Source, SourceBreakpoint};
-    use tokio::{
-        io::{Stdin, Stdout},
-        sync::mpsc::Receiver,
-    };
 
-    use crate::async_client::AsyncClientImpl;
+    use crate::client::ClientImpl;
 
     use super::*;
 
@@ -863,8 +826,8 @@ mod tests {
         "/home/somebody/src/MyPackage/classes/SomeClass.uc"
     };
 
-    fn make_client() -> AsyncClientImpl<tokio::io::Stdin, tokio::io::Stdout> {
-        AsyncClientImpl::new(tokio::io::stdin(), tokio::io::stdout())
+    fn make_client(sender: Sender<AdapterMessage>) -> ClientImpl<Stdout> {
+        ClientImpl::new(std::io::stdin(), std::io::stdout(), sender)
     }
 
     struct MockConnection {}
@@ -878,10 +841,6 @@ mod tests {
         }
 
         fn next_response(&mut self) -> Result<UnrealResponse, Error> {
-            unreachable!()
-        }
-
-        fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent> {
             unreachable!()
         }
 
@@ -948,9 +907,11 @@ mod tests {
         }
     }
 
-    fn make_test_adapter() -> UnrealscriptAdapter<AsyncClientImpl<Stdin, Stdout>> {
+    fn make_test_adapter() -> UnrealscriptAdapter<ClientImpl<Stdout>> {
+        let (tx, rx) = channel();
         UnrealscriptAdapter::new(
-            make_client(),
+            make_client(tx),
+            rx,
             ClientConfig::new(),
             Box::new(MockConnection {}),
             None,

@@ -6,8 +6,9 @@ mod fixture;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn equal_version() {
-    let (client, mut erx, _rtx) = fixture::make_test_client();
-    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client).await;
+    let (client, erx) = fixture::make_test_client();
+    let (amtx, amrx) = std::sync::mpsc::channel();
+    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client, amtx, amrx).await;
 
     tokio::task::spawn(async move {
         // Fetch the initialized command and return a response.
@@ -25,13 +26,13 @@ async fn equal_version() {
         drop(comm);
     });
 
-    tokio::task::spawn(async move {
+    std::thread::spawn(move || {
         // We should get an initialized event first from construction of the adapter.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Initialized));
 
         // Then we'll get a terminated event because we closed the interface connection.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Terminated));
     });
 
@@ -41,14 +42,14 @@ async fn equal_version() {
             minor: 1,
             patch: 0,
         })
-        .await
         .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn larger_major() {
-    let (client, mut erx, _rtx) = fixture::make_test_client();
-    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client).await;
+    let (client, erx) = fixture::make_test_client();
+    let (amtx, amrx) = std::sync::mpsc::channel();
+    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client, amtx, amrx).await;
 
     tokio::task::spawn(async move {
         // Fetch the initialized command and return a response.
@@ -70,9 +71,9 @@ async fn larger_major() {
         drop(comm);
     });
 
-    tokio::task::spawn(async move {
+    std::thread::spawn(move || {
         // We should get an output event telling us there is a version mismatch
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         match evt.body {
             EventBody::Output(o) => {
                 assert!(matches!(o.category, OutputEventCategory::Console));
@@ -81,11 +82,11 @@ async fn larger_major() {
         };
 
         // We should get an initialized event from construction of the adapter.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Initialized));
 
         // Then we'll get a terminated event because we closed the interface connection.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Terminated));
     });
 
@@ -95,14 +96,14 @@ async fn larger_major() {
             minor: 1,
             patch: 0,
         })
-        .await
         .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn larger_minor() {
-    let (client, mut erx, _rtx) = fixture::make_test_client();
-    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client).await;
+    let (client, erx) = fixture::make_test_client();
+    let (amtx, amrx) = std::sync::mpsc::channel();
+    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client, amtx, amrx).await;
 
     tokio::task::spawn(async move {
         // Fetch the initialized command and return a response.
@@ -124,9 +125,9 @@ async fn larger_minor() {
         drop(comm);
     });
 
-    tokio::task::spawn(async move {
+    std::thread::spawn(move || {
         // We should get an output event telling us there is a version mismatch
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         match evt.body {
             EventBody::Output(o) => {
                 assert!(matches!(o.category, OutputEventCategory::Console));
@@ -135,11 +136,11 @@ async fn larger_minor() {
         };
 
         // We should get an initialized event from construction of the adapter.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Initialized));
 
         // Then we'll get a terminated event because we closed the interface connection.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Terminated));
     });
 
@@ -149,14 +150,14 @@ async fn larger_minor() {
             minor: 1,
             patch: 0,
         })
-        .await
         .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn larger_patch() {
-    let (client, mut erx, _rtx) = fixture::make_test_client();
-    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client).await;
+    let (client, erx) = fixture::make_test_client();
+    let (amtx, amrx) = std::sync::mpsc::channel();
+    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client, amtx, amrx).await;
 
     tokio::task::spawn(async move {
         // Fetch the initialized command and return a response.
@@ -178,9 +179,9 @@ async fn larger_patch() {
         drop(comm);
     });
 
-    tokio::task::spawn(async move {
+    std::thread::spawn(move || {
         // We should get an output event telling us there is a version mismatch
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         match evt.body {
             EventBody::Output(o) => {
                 assert!(matches!(o.category, OutputEventCategory::Console));
@@ -189,11 +190,11 @@ async fn larger_patch() {
         };
 
         // We should get an initialized event from construction of the adapter.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Initialized));
 
         // Then we'll get a terminated event because we closed the interface connection.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Terminated));
     });
 
@@ -203,14 +204,14 @@ async fn larger_patch() {
             minor: 1,
             patch: 0,
         })
-        .await
         .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn smaller_major() {
-    let (client, mut erx, _rtx) = fixture::make_test_client();
-    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client).await;
+    let (client, erx) = fixture::make_test_client();
+    let (amtx, amrx) = std::sync::mpsc::channel();
+    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client, amtx, amrx).await;
 
     tokio::task::spawn(async move {
         // Fetch the initialized command and return a response.
@@ -232,9 +233,9 @@ async fn smaller_major() {
         drop(comm);
     });
 
-    tokio::task::spawn(async move {
+    std::thread::spawn(move || {
         // We should get an output event telling us there is a version mismatch
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         match evt.body {
             EventBody::Output(o) => {
                 assert!(matches!(o.category, OutputEventCategory::Console));
@@ -243,11 +244,11 @@ async fn smaller_major() {
         };
 
         // We should get an initialized event from construction of the adapter.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Initialized));
 
         // Then we'll get a terminated event because we closed the interface connection.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Terminated));
     });
 
@@ -257,14 +258,14 @@ async fn smaller_major() {
             minor: 1,
             patch: 0,
         })
-        .await
         .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn smaller_minor() {
-    let (client, mut erx, _rtx) = fixture::make_test_client();
-    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client).await;
+    let (client, erx) = fixture::make_test_client();
+    let (amtx, amrx) = std::sync::mpsc::channel();
+    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client, amtx, amrx).await;
 
     tokio::task::spawn(async move {
         // Fetch the initialized command and return a response.
@@ -286,9 +287,9 @@ async fn smaller_minor() {
         drop(comm);
     });
 
-    tokio::task::spawn(async move {
+    std::thread::spawn(move || {
         // We should get an output event telling us there is a version mismatch
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         match evt.body {
             EventBody::Output(o) => {
                 assert!(matches!(o.category, OutputEventCategory::Console));
@@ -297,11 +298,11 @@ async fn smaller_minor() {
         };
 
         // We should get an initialized event from construction of the adapter.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Initialized));
 
         // Then we'll get a terminated event because we closed the interface connection.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Terminated));
     });
 
@@ -311,14 +312,14 @@ async fn smaller_minor() {
             minor: 1,
             patch: 0,
         })
-        .await
         .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn smaller_patch() {
-    let (client, mut erx, _rtx) = fixture::make_test_client();
-    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client).await;
+    let (client, erx) = fixture::make_test_client();
+    let (amtx, amrx) = std::sync::mpsc::channel();
+    let (mut adapter, mut dbg, mut comm) = fixture::setup_with_client(client, amtx, amrx).await;
 
     tokio::task::spawn(async move {
         // Fetch the initialized command and return a response.
@@ -340,9 +341,9 @@ async fn smaller_patch() {
         drop(comm);
     });
 
-    tokio::task::spawn(async move {
+    std::thread::spawn(move || {
         // We should get an output event telling us there is a version mismatch
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         match evt.body {
             EventBody::Output(o) => {
                 assert!(matches!(o.category, OutputEventCategory::Console));
@@ -351,11 +352,11 @@ async fn smaller_patch() {
         };
 
         // We should get an initialized event from construction of the adapter.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Initialized));
 
         // Then we'll get a terminated event because we closed the interface connection.
-        let evt = erx.recv().await.unwrap();
+        let evt = erx.recv().unwrap();
         assert!(matches!(evt.body, EventBody::Terminated));
     });
 
@@ -365,6 +366,5 @@ async fn smaller_patch() {
             minor: 1,
             patch: 3,
         })
-        .await
         .unwrap();
 }

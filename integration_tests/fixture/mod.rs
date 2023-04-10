@@ -1,22 +1,19 @@
 use adapter::{
-    async_client::{AsyncClient, AsyncClientImpl},
+    client::{Client, ClientImpl},
     client_config::ClientConfig,
     comm::tcp::TcpConnection,
     connected_adapter::UnrealscriptAdapter,
+    AdapterMessage,
 };
 use common::{UnrealCommand, UnrealInterfaceMessage};
-use dap::{events::Event, requests::Request};
-use futures::{executor, stream::SplitStream, SinkExt, StreamExt};
+use dap::events::Event;
+use futures::{stream::SplitStream, SinkExt, StreamExt};
 use interface::debugger::Debugger;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{
-        broadcast,
-        mpsc::{channel, Receiver, Sender},
-    },
+    sync::mpsc::unbounded_channel,
 };
 use tokio_serde::formats::Json;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::LengthDelimitedCodec;
 
 pub type TcpFrame = tokio_serde::Framed<
@@ -30,22 +27,32 @@ pub type TcpFrame = tokio_serde::Framed<
 /// - construct an adapter and client
 /// - Create a channel to receive events and hook this up to the client
 /// - open a TCP listener for a mock interface on a random port.
-/// - Spawn a thread to process messages on that port and dispatch them to the provided closure
-/// - Initialize communication between the two by sending an initialize and attach request.
+/// - Spawns a task that will monitor the debugger object's event channel and
+///   push them through the TCP connection.
 ///
-/// Returns the adapter, client, the receiving end of the event channel, and a join handle for the thread.
+/// Returns the adapter, debugger, and the receiving end of the debugger's TCP channel.
 ///
-/// Test cases can now send requests and receive responses through the adapter. Events sent from
-/// the closure will appear in the event receiver.
+/// Test cases can then spawn an async task to process the debugger: this task is
+/// responsible for reading commands from the returned TCP stream and feeding them
+/// to the debugger instance in the order it wants them to appear, and can also initiate
+/// events by interacting with the debugger object.
+///
+/// Test cases can also interact with the adapter to send requests and inspect responses
+/// with the accept function, or can spawn a dedicated thread to interact with the client
+/// by writing to the client's input stream and have the test case run the normal adapter
+/// event loop.
 
-pub async fn setup_with_client<C: AsyncClient>(
+pub async fn setup_with_client<C: Client>(
     client: C,
+    sender: std::sync::mpsc::Sender<AdapterMessage>,
+    receiver: std::sync::mpsc::Receiver<AdapterMessage>,
 ) -> (UnrealscriptAdapter<C>, Debugger, SplitStream<TcpFrame>) {
     let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp.local_addr().unwrap().port();
 
     let adapter = UnrealscriptAdapter::new(
         client,
+        receiver,
         ClientConfig {
             one_based_lines: true,
             supports_variable_type: true,
@@ -54,13 +61,13 @@ pub async fn setup_with_client<C: AsyncClient>(
             enable_stack_hack: false,
             auto_resume: false,
         },
-        Box::new(TcpConnection::connect(port).await.unwrap()),
+        Box::new(TcpConnection::connect(port, sender).unwrap()),
         None,
         None,
     );
 
     log::trace!("Created adapter");
-    let (ctx, _crx) = broadcast::channel(1);
+    let (ctx, _crx) = unbounded_channel();
     let mut dbg = Debugger::new(ctx, None);
     let (stream, _addr) = tcp.accept().await.unwrap();
     log::trace!("Got connection");
@@ -74,7 +81,7 @@ pub async fn setup_with_client<C: AsyncClient>(
     let tcp_stream = tokio_serde::Framed::new(frame, format);
     let (mut tcp_tx, tcp_rx) = tcp_stream.split();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+    let (tx, mut rx) = unbounded_channel();
     dbg.new_connection(tx);
 
     // Spawn a task to monitor the receiving side of events and push them through the TCP
@@ -90,58 +97,44 @@ pub async fn setup_with_client<C: AsyncClient>(
 
 #[allow(dead_code)]
 pub async fn setup() -> (
-    UnrealscriptAdapter<AsyncClientImpl<tokio::io::Stdin, tokio::io::Stdout>>,
+    UnrealscriptAdapter<ClientImpl<std::io::Stdout>>,
     Debugger,
     SplitStream<TcpFrame>,
 ) {
-    setup_with_client(AsyncClientImpl::new(
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-    ))
+    let (tx, rx) = std::sync::mpsc::channel();
+    setup_with_client(
+        ClientImpl::new(std::io::stdin(), std::io::stdout(), tx.clone()),
+        tx,
+        rx,
+    )
     .await
 }
 
 pub struct TestClient {
-    etx: Sender<Event>,
-    rstream: ReceiverStream<Result<Request, std::io::Error>>,
+    etx: std::sync::mpsc::Sender<Event>,
 }
 
 impl TestClient {
-    pub fn new(etx: Sender<Event>, rrx: Receiver<Result<Request, std::io::Error>>) -> Self {
-        TestClient {
-            etx,
-            rstream: ReceiverStream::new(rrx),
-        }
+    pub fn new(etx: std::sync::mpsc::Sender<Event>) -> Self {
+        TestClient { etx }
     }
 }
 
-impl AsyncClient for TestClient {
-    type St = ReceiverStream<Result<Request, std::io::Error>>;
-
-    fn next_request(&mut self) -> futures::stream::Next<'_, Self::St> {
-        self.rstream.next()
-    }
-
+impl Client for TestClient {
     fn respond(&mut self, _: dap::responses::Response) -> Result<(), std::io::Error> {
         Ok(())
     }
 
     fn send_event(&mut self, event: Event) -> Result<(), std::io::Error> {
-        executor::block_on(async { self.etx.send(event).await.unwrap() });
+        self.etx.send(event).unwrap();
         Ok(())
     }
 }
 
-/// Create a test client and return it, a channel to receive events from it, and a channel to send
-/// requests to it.
+/// Create a test client and return it and a channel to receive events from it.
 #[allow(dead_code)]
-pub fn make_test_client() -> (
-    TestClient,
-    Receiver<Event>,
-    Sender<Result<Request, std::io::Error>>,
-) {
-    let (etx, erx) = channel(1);
-    let (rtx, rrx) = channel(1);
-    let client = TestClient::new(etx, rrx);
-    (client, erx, rtx)
+pub fn make_test_client() -> (TestClient, std::sync::mpsc::Receiver<Event>) {
+    let (etx, erx) = std::sync::mpsc::channel();
+    let client = TestClient::new(etx);
+    (client, erx)
 }

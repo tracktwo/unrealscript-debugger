@@ -1,5 +1,7 @@
+use std::sync::mpsc::channel;
+
 use adapter::{
-    async_client::AsyncClientImpl,
+    client::ClientImpl,
     disconnected_adapter::{DisconnectedAdapter, DisconnectedAdapterError},
     _LOGGER,
 };
@@ -12,8 +14,7 @@ const ADAPTER_VERSION: Version = Version {
     patch: pkg_version_patch!(),
 };
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Create the logging instance.
     _LOGGER.write().unwrap().replace(create_logger("adapter"));
 
@@ -22,15 +23,16 @@ async fn main() {
         log::error!("Panic: {p:#?}");
     }));
 
-    let client = AsyncClientImpl::new(tokio::io::stdin(), tokio::io::stdout());
-    let mut adapter = DisconnectedAdapter::new(client);
+    let (tx, rx) = channel();
+    let client = ClientImpl::new(std::io::stdin(), std::io::stdout(), tx.clone());
+    let mut adapter = DisconnectedAdapter::new(client, tx, rx);
 
     log::info!("Ready to start!");
     let return_code = loop {
-        match adapter.connect().await {
+        match adapter.connect() {
             Ok(mut connected) => {
                 log::info!("Connection established!");
-                match connected.process_messages(ADAPTER_VERSION).await {
+                match connected.process_messages(ADAPTER_VERSION) {
                     Ok(()) => {
                         log::info!("Debugger session ended.");
                         break 0;

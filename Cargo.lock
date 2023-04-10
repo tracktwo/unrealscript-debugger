@@ -7,22 +7,15 @@ name = "adapter"
 version = "0.1.1"
 dependencies = [
  "bit_field",
- "bytes",
  "common",
  "dap",
  "flexi_logger 0.25.3",
- "futures",
  "interface",
  "log",
- "memmem",
  "pkg-version",
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
- "tokio-serde",
- "tokio-stream",
- "tokio-util",
 ]
 
 [[package]]
@@ -526,12 +519,6 @@ name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
-
-[[package]]
-name = "memmem"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a64a92489e2744ce060c349162be1c5f33c6969234104dbd99ddb5feb08b8c15"
 
 [[package]]
 name = "mio"

@@ -9,9 +9,8 @@ use std::io::{Error, ErrorKind};
 
 use common::{
     Breakpoint, FrameIndex, InitializeRequest, StackTraceRequest, StackTraceResponse,
-    UnrealCommand, UnrealEvent, UnrealResponse, Variable, VariableIndex, Version, WatchKind,
+    UnrealCommand, UnrealResponse, Variable, VariableIndex, Version, WatchKind,
 };
-use tokio::sync::mpsc::Receiver;
 
 macro_rules! expect_response {
     ($e:expr, $p:path) => {
@@ -28,22 +27,19 @@ macro_rules! expect_response {
 
 /// A trait for representing a connection to an Unreal debug adapter.
 ///
-/// The connection to Unreal is partially synchronous and partially asynchronous.
-/// This helps simplify the logic in both the adapter and the interface by limiting
-/// the amount of concurrency it needs to manage. The communications protocol between
-/// these two components is like a limited form of DAP itself, but since it's partially
-/// synchronous we do not need to deal with sequence numbers or to manage complex
-/// state within either component to account for multiple concurrent messages.
+/// The connection to Unreal is synchronous. This helps simplify the logic in both the adapter and
+/// the interface by limiting the amount of concurrency it needs to manage. The communications
+/// protocol between these two components is like a limited form of DAP itself, but since it's
+/// synchronous we do not need to deal with sequence numbers or to manage complex state
+/// within either component to account for multiple concurrent messages.
 ///
-/// The trait defines only three required methods:
+/// The trait defines only two required methods:
 ///
 /// - send_command: To synchronously send a command from the adapter to the interface.
 ///   This blocks until the command has been successfully sent, preventing multiple
 ///   commands from being sent at the same time.
 /// - next_response: To synchronously read a response from the interface to the adapter.
 ///   This blocks until a response has been received.
-/// - event_receiver: Returns a reference to a receiver that can be used to read events.
-///   This channel is asynchronous.
 ///
 /// The trait also provides a higher-level interface of synchronous functions to manage
 /// a transaction from the adapter to the interface, usually a command that results in
@@ -58,6 +54,11 @@ macro_rules! expect_response {
 /// that will never come. The protocol is very simple, so any out of sync error is
 /// likely to be an interrupted connection which will close the channel and unblock
 /// the caller anyway.
+///
+/// This does not handle events: these are asynchronous by nature and so are handled
+/// with a different mechanism outside this trait. Events are multiplexed into a
+/// channel along with DAP requests so the adapter can monitor a single receiver
+/// that can handle both kinds of inputs.
 pub trait Connection: Send {
     /// Send the given command to the interface.
     ///
@@ -72,10 +73,6 @@ pub trait Connection: Send {
     ///
     /// Returns an I/O error if the response cannot be read.
     fn next_response(&mut self) -> Result<UnrealResponse, Error>;
-
-    /// Get a reference to the receiving end of a channel that will receive events
-    /// from the interface. These are received asynchronously.
-    fn event_receiver(&mut self) -> &mut Receiver<UnrealEvent>;
 
     /// Send an initialize request to the interface and retrieve the response. Exchanges
     /// version information and other config data.
